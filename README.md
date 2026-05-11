@@ -2,7 +2,13 @@
 
 Local selection dictionary lookup popup for Dank Material Shell, inspired by macOS Look Up.
 
-Select text in any application and press `Mod+Alt+D` to see a Material 3 floating card with dictionary definitions.
+Select text in any application, press `Mod+Alt+D`, and a Material 3 floating card appears with dictionary definitions — entirely offline, no network, no daemon, no clipboard monitoring. Supports Mandarin (萌典), Cantonese (words.hk), Japanese (reader.dict), and English (GCIDE / WordNet / XDICT) via a single mode-switching popup.
+
+## Screenshot
+
+![Looking up 釋疑 over a classical-Chinese reader on ctext.org — han mode with single-source pill and Copy / Open-full actions](docs/images/popup-han-mode.png)
+
+Looking up **釋疑** (`shì yí`) on a ctext.org page. Single-mode display collapses the segmented row into a source pill alongside Copy (C) and Open-full (F) actions; the Asebi Mincho serif title differentiates CJK queries from Latin ones. Multi-mode queries (e.g. an English word with both 漢英 and 英英 results) show a segmented switcher instead of the pill.
 
 ## Features
 
