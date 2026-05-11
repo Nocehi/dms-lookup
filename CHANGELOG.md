@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.0e (2026-05-11)
+
+- Backend no-sdcv fallback (`lib/backends/sdcv.sh`): query now passes via `sys.argv[1]` instead of shell-quoting into the Python heredoc
+- Closes a localised quote-injection edge case in the mock path when `sdcv` is not installed and the query contains a single quote
+- Main code path was already argv-based; this brings the fallback branch in line
+
 ## v0.5.0d (2026-05-07)
 
 - QML Process lifecycle fix: `copyToClipboard()` and `openFullSource()` now close stdin via `stdinEnabled=false` after `p.write()`

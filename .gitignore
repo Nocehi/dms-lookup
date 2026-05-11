@@ -22,3 +22,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Claude Code /export transcripts — never commit
+*-local-command-caveat*.txt

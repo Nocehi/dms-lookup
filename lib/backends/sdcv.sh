@@ -9,8 +9,8 @@ mkdir -p "$out_dir"
 if ! command -v sdcv &>/dev/null; then
   python3 -c '
 import json, sys
-json.dump({"backend":"mock","title":"'"$query"'","subtitle":"mock result until sdcv is configured","body":"Install or configure a local dictionary backend for real definitions."}, sys.stdout, indent=2, ensure_ascii=False)
-' > "$out_file"
+json.dump({"backend":"mock","title":sys.argv[1],"subtitle":"mock result until sdcv is configured","body":"Install or configure a local dictionary backend for real definitions."}, sys.stdout, indent=2, ensure_ascii=False)
+' "$query" > "$out_file"
   exit 0
 fi
 
