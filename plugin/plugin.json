@@ -1,0 +1,13 @@
+{
+  "id": "dankLookup",
+  "name": "Dank Lookup",
+  "description": "Local selection dictionary lookup popup for DMS",
+  "version": "0.1.0",
+  "author": "local",
+  "type": "launcher",
+  "capabilities": ["lookup", "selection", "dictionary"],
+  "component": "./DankLookup.qml",
+  "icon": "menu_book",
+  "requires_dms": ">=1.2.0",
+  "permissions": ["process"]
+}

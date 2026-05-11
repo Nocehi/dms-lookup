@@ -1,0 +1,16 @@
+{
+  "query": "Linux",
+  "expect": {
+    "backend": "sdcv",
+    "available_modes_contains": ["en-en"],
+    "available_modes_not_contains": [],
+    "results_by_mode.en-en": {
+      "subtitle_contains": ["WordNet"],
+      "body_contains": ["Linux"],
+      "body_not_contains": ["Linum", "Cinura"]
+    },
+    "related_by_mode.en-en": {
+      "body_contains_any": ["Linum"]
+    }
+  }
+}

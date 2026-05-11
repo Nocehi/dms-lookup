@@ -1,0 +1,17 @@
+{
+  "query": "字典",
+  "expect": {
+    "backend": "sdcv",
+    "default_mode": "han",
+    "available_modes_contains": ["han", "yue", "ja"],
+    "results_by_mode.han": {
+      "subtitle_contains": ["萌典"]
+    },
+    "results_by_mode.yue": {
+      "subtitle_contains": ["words.hk"]
+    },
+    "results_by_mode.ja": {
+      "subtitle_contains": ["reader.dict JA"]
+    }
+  }
+}

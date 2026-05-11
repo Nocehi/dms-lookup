@@ -1,0 +1,12 @@
+{
+  "query": "consolidate",
+  "expect": {
+    "backend": "sdcv",
+    "default_mode": "han-en",
+    "available_modes_contains": ["han-en", "en-en"],
+    "results_by_mode.han-en": {
+      "subtitle_contains": ["XDICT"],
+      "body_contains": ["鞏固"]
+    }
+  }
+}

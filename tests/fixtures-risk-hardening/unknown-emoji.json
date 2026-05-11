@@ -1,0 +1,9 @@
+{
+  "query": "🙂",
+  "expect": {
+    "default_mode_not": "ja",
+    "available_modes_not_contains": [
+      "ja"
+    ]
+  }
+}

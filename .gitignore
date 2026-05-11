@@ -1,0 +1,24 @@
+# Dictionary data — never commit
+*.ifo
+*.idx
+*.dict
+*.dict.dz
+*.syn
+
+# Converted dictionary sources — never commit
+*words.hk*.csv
+*words.hk*.tsv
+
+# Runtime output — never commit
+latest.json
+backend_result.json
+/tmp/dank-lookup/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~

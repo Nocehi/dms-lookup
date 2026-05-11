@@ -1,0 +1,44 @@
+{
+  "query": "consolidate",
+  "source": "primary",
+  "timestamp": "2026-05-06T12:00:00+08:00",
+  "truncated": false,
+  "backend": "sdcv",
+  "default_mode": "han-en",
+  "available_modes": ["han-en", "en-en"],
+  "results_by_mode": {
+    "han-en": {
+      "label": "漢英",
+      "subtitle": "Sample Chinese-English Dictionary",
+      "body": "[Sample Chinese-English Dictionary]\n/sample-definition/\n1. to make solid or firm."
+    },
+    "en-en": {
+      "label": "英英",
+      "subtitle": "Sample English Dictionary",
+      "body": "[Sample English Dictionary]\nConsolidate: to join together into one whole."
+    }
+  },
+  "related_by_mode": {
+    "en-en": {
+      "label": "Related",
+      "subtitle": "Fallback Dictionary",
+      "body": "[Fallback Dictionary]\nConsolidation: the action of consolidating."
+    }
+  },
+  "mode_preferences": {
+    "en-en": { "show_related": false }
+  },
+  "config": {
+    "path": null,
+    "loaded": false,
+    "warning": null
+  },
+  "results": [
+    {
+      "title": "consolidate",
+      "subtitle": "Sample Chinese-English Dictionary",
+      "body": "[Sample Chinese-English Dictionary]\n/sample-definition/\n1. to make solid or firm."
+    }
+  ],
+  "error": null
+}

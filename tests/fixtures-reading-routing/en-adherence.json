@@ -1,0 +1,13 @@
+{
+  "query": "adherence",
+  "expect": {
+    "backend": "sdcv",
+    "default_mode": "en-en",
+    "available_modes_contains": ["en-en"],
+    "available_modes_not_contains": ["han", "yue", "ja"],
+    "results_by_mode.en-en": {
+      "subtitle_contains": ["WordNet", "dictd_www.dict.org_gcide"],
+      "body_contains": ["Adherence"]
+    }
+  }
+}

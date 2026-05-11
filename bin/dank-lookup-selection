@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+out_dir="/tmp/dank-lookup"
+out_file="$out_dir/latest.json"
+tmp_file="$out_dir/latest.json.tmp"
+backend_script="$HOME/.local/lib/dank-lookup/backends/sdcv.sh"
+mkdir -p "$out_dir"
+
+cooldown_file="$out_dir/cooldown"
+now_ms="$(date +%s%3N)"
+if [ -f "$cooldown_file" ]; then
+  last_ms="$(cat "$cooldown_file" 2>/dev/null || echo 0)"
+  if [ $((now_ms - last_ms)) -lt 700 ]; then
+    exit 0
+  fi
+fi
+printf '%s\n' "$now_ms" > "$cooldown_file"
+
+source_name="primary"
+query="$(timeout 0.25 wl-paste --primary --no-newline 2>/dev/null || true)"
+
+if [ -z "${query//[[:space:]]/}" ]; then
+  source_name="clipboard"
+  query="$(timeout 0.25 wl-paste --no-newline 2>/dev/null || true)"
+fi
+
+query="$(printf '%s' "$query" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s '[:space:]' ' ')"
+
+if [ -z "${query//[[:space:]]/}" ]; then
+  export SOURCE="$source_name"
+  python3 -c '
+import json, os, sys
+result = {
+  "query": "",
+  "source": os.environ.get("SOURCE", ""),
+  "timestamp": "",
+  "truncated": False,
+  "backend": "mock",
+  "results": [],
+  "error": "No selection or clipboard content"
+}
+json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+' > "$tmp_file"
+mv "$tmp_file" "$out_file"
+cat "$out_file"
+echo "$(date --iso-8601=seconds) source=$source_name query=${query:0:50}" >> "$out_dir/debug.log"
+  exit 0
+fi
+
+truncated=false
+if [ ${#query} -gt 500 ]; then
+  query="${query:0:500}"
+  truncated=true
+fi
+
+"$backend_script" "$query"
+
+export QUERY="$query"
+export SOURCE="$source_name"
+export TIMESTAMP="$(date --iso-8601=seconds)"
+export TRUNCATED="$truncated"
+
+if [ -f "$out_dir/backend_result.json" ]; then
+  python3 -c '
+import json, sys, os
+
+with open(sys.argv[1]) as f:
+    br = json.load(f)
+
+result = {
+  "query": os.environ["QUERY"],
+  "source": os.environ["SOURCE"],
+  "timestamp": os.environ["TIMESTAMP"],
+  "truncated": os.environ.get("TRUNCATED", "false") == "true",
+  "backend": br.get("backend", "mock"),
+  "default_mode": br.get("default_mode"),
+  "available_modes": br.get("available_modes"),
+  "results_by_mode": br.get("results_by_mode"),
+  "related_by_mode": br.get("related_by_mode"),
+  "mode_preferences": br.get("mode_preferences"),
+  "config": br.get("config"),
+  "results": [
+    {
+      "title": br.get("title", os.environ["QUERY"]),
+      "subtitle": br.get("subtitle", ""),
+      "body": br.get("body", "")
+    }
+  ],
+  "error": None
+}
+json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+' "$out_dir/backend_result.json" > "$tmp_file"
+else
+  python3 -c '
+import json, os
+result = {
+  "query": os.environ["QUERY"],
+  "source": os.environ["SOURCE"],
+  "timestamp": os.environ["TIMESTAMP"],
+  "truncated": os.environ.get("TRUNCATED", "false") == "true",
+  "backend": "mock",
+  "results": [],
+  "error": "Backend adapter did not produce a result"
+}
+json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+' > "$tmp_file"
+fi
+
+mv "$tmp_file" "$out_file"
+cat "$out_file"
+echo "$(date --iso-8601=seconds) source=$source_name query=${query:0:50}" >> "$out_dir/debug.log"

@@ -1,0 +1,13 @@
+{
+  "query": "俳句",
+  "expect": {
+    "backend": "sdcv",
+    "default_mode": "ja",
+    "available_modes_contains": ["ja"],
+    "available_modes_not_contains": ["han", "yue"],
+    "results_by_mode.ja": {
+      "subtitle_contains": ["reader.dict JA"],
+      "body_contains": ["はいく", "短詩形"]
+    }
+  }
+}
