@@ -65,6 +65,30 @@ FloatingWindow
       Optional footer actions
 ```
 
+Containment: the card has two visual zones separated by a single rule.
+
+```text
+┌──────────────────────────────────────────────┐
+│  Query zone   (query title, pronunciation)   │
+│──────────────────────────────────────────────│
+│  Result zone  (segmented, source, body,      │
+│                footer actions)               │
+└──────────────────────────────────────────────┘
+```
+
+The query zone answers "what am I looking at"; the result zone answers "here is the answer". A thin horizontal rule (`0.5px`, `Theme.outlineMedium` or `var(--rule)`) at the bottom of the pronunciation row is sufficient. Do not add further dividers between segmented row, source label, and body — these are already visually distinct by element shape (pill buttons vs small label vs long text).
+
+```qml
+Rectangle {
+    width: parent.width
+    height: 1
+    color: Theme.outlineMedium || "#444444"
+    opacity: 0.5
+}
+```
+
+Do not use background color blocks to separate zones within the card. The card itself is already a contained surface; internal zones rely on the rule plus spacing.
+
 Avoid:
 
 - card inside card
@@ -273,6 +297,82 @@ Optional V2b actions:
 
 Do not add network actions by default.
 
+## Motion
+
+The popup is transient — motion should be brief and purposeful, not decorative. Three scenarios only:
+
+### Popup appear
+
+Scale from 0.92 to 1.0 with opacity 0→1, ~200ms ease-out. The popup should feel like it surfaces toward the user, not slides in from an edge.
+
+```qml
+FloatingWindow {
+    id: popup
+    opacity: 0
+    scale: 0.92
+
+    NumberAnimation on opacity {
+        to: 1; duration: 200
+        easing.type: Easing.OutCubic
+        running: popup.visible
+    }
+    NumberAnimation on scale {
+        to: 1.0; duration: 200
+        easing.type: Easing.OutCubic
+        running: popup.visible
+    }
+}
+```
+
+### Popup dismiss
+
+Opacity 1→0, ~150ms. No scale change on dismiss — it should vanish quickly without drawing attention back to itself.
+
+```qml
+function dismiss() {
+    dismissAnim.start()
+}
+NumberAnimation {
+    id: dismissAnim
+    target: popup
+    property: "opacity"
+    to: 0; duration: 150
+    easing.type: Easing.InCubic
+    onFinished: popup.visible = false
+}
+```
+
+### Mode switch cross-fade
+
+When the user switches dictionary mode, the body content cross-fades: old content fades out (~100ms), new content fades in (~100ms). Do not animate the segmented row or source label — only the definition body region.
+
+```qml
+Behavior on bodyText {
+    SequentialAnimation {
+        NumberAnimation {
+            target: bodyLabel
+            property: "opacity"
+            to: 0; duration: 100
+            easing.type: Easing.InCubic
+        }
+        PropertyAction { target: bodyLabel; property: "text" }
+        NumberAnimation {
+            target: bodyLabel
+            property: "opacity"
+            to: 1; duration: 100
+            easing.type: Easing.OutCubic
+        }
+    }
+}
+```
+
+Avoid:
+
+- spring / bounce animations — the popup is a utility surface, not a playful element
+- position animations (slide-in from edge, drop from top)
+- animating the card border, shadow, or radius
+- motion longer than 250ms total for any single transition
+
 ## Backend contract for future UI
 
 Current contract:
@@ -336,3 +436,7 @@ Phase UI-3: Backend multi-mode
 - English `consolidate` can switch to `英英` and show GCIDE/WordNet content.
 - Chinese `字典` / `正常` can switch between available `漢語` and `漢英` results.
 - Missing mode does not crash UI.
+- Query zone and result zone are separated by a single thin rule below pronunciation.
+- Popup appears with scale+opacity animation (~200ms), no instant pop-in.
+- Popup dismisses with opacity fade (~150ms), no lingering.
+- Mode switch cross-fades body content without animating segmented row or source label.

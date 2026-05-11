@@ -119,10 +119,11 @@ def strip_def(dict_name, text):
         text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
-def build_body(entries):
+def build_body(entries, max_entry_chars=4000, max_body_chars=12000):
     seen = set()
     parts = []
     dicts = set()
+    total = 0
     for entry in entries:
         dn = str(entry.get("dict", "")).strip()
         df = strip_def(dn, str(entry.get("definition", "")))
@@ -132,8 +133,14 @@ def build_body(entries):
         if key in seen:
             continue
         seen.add(key)
+        if len(df) > max_entry_chars:
+            df = df[:max_entry_chars] + "\n[… truncated]"
+        section = "[" + dn + "]\n" + df
+        if total + len(section) > max_body_chars:
+            break
+        parts.append(section)
         dicts.add(dn)
-        parts.append("[" + dn + "]\n" + df)
+        total += len(section)
     return "\n\n".join(parts), dicts
 
 def is_exact(entry):

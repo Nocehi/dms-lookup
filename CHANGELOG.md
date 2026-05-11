@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.6.0 (2026-05-12)
+
+- Dictionary coverage audit with `tests/coverage_probe.py` (12 suites, 188 terms)
+- ja mode coverage: JMdict deployed (412k entries, CC-BY-SA 4.0), verbs/hiragana 0%→100%
+- han mode: CC-CEDICT deployed (122k entries, both trad/simp idx entries), simplified Chinese 0%→100%
+- en-en mode: English Wiktionary deployed (1.3M entries, truncation at 4000/12000 chars), modern tech terms now covered
+- han-en mode enabled in local config for mixed-script queries
+- `build_body()` in sdcv.sh: per-entry truncation (4000 chars) + total body limit (12000 chars) for Wiktionary noise control
+- Fixture updates: 3 reading-routing fixtures reflect expanded cross-mode coverage from JMdict + CC-CEDICT
+- Overall coverage: 82% → 93% (174/188 terms across all suites)
+
 ## v0.5.0e (2026-05-11)
 
 - Backend no-sdcv fallback (`lib/backends/sdcv.sh`): query now passes via `sys.argv[1]` instead of shell-quoting into the Python heredoc

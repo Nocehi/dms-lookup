@@ -4,7 +4,7 @@
     "backend": "sdcv",
     "default_mode": "han",
     "available_modes_contains": ["han"],
-    "available_modes_not_contains": ["yue", "ja"],
+    "available_modes_not_contains": ["yue"],
     "results_by_mode.han": {
       "subtitle_contains": ["萌典"],
       "body_contains": ["藝術", "審美"]
