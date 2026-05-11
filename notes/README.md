@@ -42,6 +42,21 @@
 | [v0.5.0c-review-prep-and-doc-sync-handoff.md](v0.5.0c-review-prep-and-doc-sync-handoff.md) | review 前 doc sync：對齊 v0.5.0a 與實際落地差異（helper component 棄置、Copy 改 wl-copy） | historical |
 | [v0.5.0d.qml-process-lifecycle-fix.md](v0.5.0d.qml-process-lifecycle-fix.md) | `Process.stdinEnabled = false` 關閉 stdin 傳遞 EOF；Quickshell API 調查紀錄 | historical |
 
+### 觸摸板手勢探索
+
+| 檔案 | 範圍 | 狀態 |
+|------|------|------|
+| [gesture-trigger-exploration.md](gesture-trigger-exploration.md) | fusuma 評估、4-finger tap watcher 方案選型、環境探測結果 | active（個人試用中，待 2 週體感數據） |
+
+### future/ — 遠期參考模式
+
+不在路線圖上。從外部專案觀察到的設計模式，當規模需求出現時再評估。
+
+| 檔案 | 來源 | 摘要 |
+|------|------|------|
+| [future/per-mode-config-fallback.md](future/per-mode-config-fallback.md) | fusuma config.rb | 三層 config lookup（gesture-specific > global > default）；DankLookup 5 mode 扁平 dict 目前夠用 |
+| [future/per-app-context.md](future/per-app-context.md) | fusuma-plugin-appmatcher | Per-app 字典模式切換（Obsidian 走漢英、Bilibili 走日語）；需 niri IPC，待場景驗證 |
+
 ## 相依檔位於 ~/文件/DankLookup/
 
 依 `danklookup-dev` skill 的目錄分工：repo `notes/` 是 stage 過的子集，個人 `~/文件/DankLookup/` 是 master（含 AI session 轉錄、review 巨檔、早期版本筆記，不適合公開）。下列檔在現存筆記的 `depends_on:` frontmatter 中被引用，未複製進 repo，但**在個人目錄內存在**：
