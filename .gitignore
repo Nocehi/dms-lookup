@@ -23,5 +23,20 @@ Thumbs.db
 *.swo
 *~
 
-# Claude Code /export transcripts — never commit
+# Python cache
+__pycache__/
+*.pyc
+
+# Development notes — not for end users
+notes/
+
+# AI assistant project config — Claude Code, Codex, OpenCode
+.claude/
+CLAUDE.md
+AGENTS.md
 *-local-command-caveat*.txt
+.codex/
+codex.md
+CODEX.md
+.opencode/
+opencode.json

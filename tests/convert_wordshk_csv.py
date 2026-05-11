@@ -5,7 +5,7 @@ Filter: OK + 已公開 rows only.
 Body: yue-first, eng-secondary, with pos/label prefix and jyutping line.
 
 Usage:
-    python3 convert_wordshk_csv.py /data/personal/Downloads/all-1778011501.csv /tmp/dank-lookup/wordshk-yue.tsv
+    python3 convert_wordshk_csv.py /path/to/words.hk-export.csv /tmp/dank-lookup/wordshk-yue.tsv
 """
 
 import csv
