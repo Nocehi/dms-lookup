@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.1 (2026-05-12)
+
+- Remove 700ms cooldown from `bin/dank-lookup-selection`; niri `repeat=false` is the sole anti-rapid-fire mechanism
+- Archive touchpad trigger route: libinput misclassifies rapid 1/2-finger taps as 4-finger tap — cooldown only suppresses repeats, cannot prevent first false positive (see `notes/gesture-trigger-exploration.md`)
+- Remove `trigger_source` argument (`tap`/`kbd`/`any`) and per-source cooldown file (`cooldown.tap`)
+- Remove `debug.log` writes from `bin/dank-lookup-selection` (privacy consistency)
+- Add `docs/json-schema.md`: formal contract for `backend_result.json` and `latest.json`
+- Sync `plugin/plugin.json` version to 0.7.1, author to Nocehi
+
 ## v0.7.0 (2026-05-12)
 
 - CJK phrase segmentation fallback: when a phrase has no direct dictionary entry, the optional `dank-lookup-tokenize` binary splits it into tokens and looks up each independently; first token with results fills the popup (QML backward compatible)

@@ -7,16 +7,6 @@ tmp_file="$out_dir/latest.json.tmp"
 backend_script="$HOME/.local/lib/dank-lookup/backends/sdcv.sh"
 mkdir -p "$out_dir"
 
-cooldown_file="$out_dir/cooldown"
-now_ms="$(date +%s%3N)"
-if [ -f "$cooldown_file" ]; then
-  last_ms="$(cat "$cooldown_file" 2>/dev/null || echo 0)"
-  if [ $((now_ms - last_ms)) -lt 700 ]; then
-    exit 0
-  fi
-fi
-printf '%s\n' "$now_ms" > "$cooldown_file"
-
 source_name="primary"
 query="$(timeout 0.25 wl-paste --primary --no-newline 2>/dev/null || true)"
 
@@ -44,7 +34,6 @@ json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
 ' > "$tmp_file"
 mv "$tmp_file" "$out_file"
 cat "$out_file"
-echo "$(date --iso-8601=seconds) source=$source_name query=${query:0:50}" >> "$out_dir/debug.log"
   exit 0
 fi
 
@@ -112,4 +101,3 @@ fi
 
 mv "$tmp_file" "$out_file"
 cat "$out_file"
-echo "$(date --iso-8601=seconds) source=$source_name query=${query:0:50}" >> "$out_dir/debug.log"
