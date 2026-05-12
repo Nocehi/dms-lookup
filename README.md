@@ -2,7 +2,7 @@
 
 Local selection dictionary lookup popup for Dank Material Shell, inspired by macOS Look Up.
 
-Select text in any application, press `Mod+Alt+D`, and a Material 3 floating card appears with dictionary definitions — entirely offline, no network, no daemon, no clipboard monitoring. Supports Mandarin (萌典), Cantonese (words.hk), Japanese (reader.dict), and English (GCIDE / WordNet / XDICT) via a single mode-switching popup.
+Select text in any application, press `Mod+Alt+D`, and a Material 3 floating card appears with dictionary definitions — entirely offline, no network, no daemon, no clipboard monitoring. Supports Mandarin (萌典 + CC-CEDICT), Cantonese (words.hk), Japanese (JMdict + reader.dict), and English (Wiktionary / GCIDE / WordNet / XDICT) via a single mode-switching popup. Multi-word CJK phrases with no direct entry are automatically split into tokens for per-token lookup.
 
 ## Screenshot
 
@@ -13,20 +13,24 @@ Looking up **釋疑** (`shì yí`) on a ctext.org page. Single-mode display coll
 ## Features
 
 - **Local**: no network, no daemon, no clipboard monitoring.
-- **Multi-source**: offline dictionaries via `sdcv` — StarDict, GCIDE, WordNet, XDICT, Moedict.
+- **Multi-source**: offline dictionaries via `sdcv` — 萌典, CC-CEDICT, JMdict, Wiktionary, GCIDE, WordNet, XDICT.
 - **Multi-mode**: configurable per-mode labels via `config.json` (漢語/漢英/英英 or any locale).
+- **Phrase segmentation**: multi-word CJK phrases split into tokens and looked up independently (optional Rust tokenizer).
 - **Configurable**: file-based source ordering via `~/.config/dank-lookup/config.json`.
 - **Wayland-native**: primary selection + clipboard fallback via `wl-paste`.
 
 ## Quick start
 
 ```bash
-# Install
+# Install (recommended)
+bash packaging/install-user.sh
+dms ipc call plugins reload dankLookup
+
+# Manual install
 install -Dm755 bin/dank-lookup-selection ~/.local/bin/dank-lookup-selection
 install -Dm755 lib/backends/sdcv.sh ~/.local/lib/dank-lookup/backends/sdcv.sh
 mkdir -p ~/.config/DankMaterialShell/plugins/dankLookup
 cp plugin/* ~/.config/DankMaterialShell/plugins/dankLookup/
-dms ipc call plugins reload dankLookup
 
 # niri keybind (add to binds.kdl):
 # Mod+Alt+D repeat=false { spawn "$HOME/.local/bin/dank-lookup-selection"; }

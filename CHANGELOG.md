@@ -1,21 +1,13 @@
 # Changelog
 
-## Big Bang Phase 2 (2026-05-12)
+## v0.7.0 (2026-05-12)
 
-- Segmentation fallback in `lib/backends/sdcv.sh`: when all modes return no result for a CJK/kana query, calls `dank-lookup-tokenize` (optional component), splits the phrase into tokens, and looks up each independently
-- New JSON keys: `segmented` (bool, always present), `tokens` (array, when segmented), `results_by_token` (dict keyed by token, when segmented)
-- Top-level `results_by_mode` filled from first token with results — QML backward compatible without Phase 3 changes
-- `bin/dank-lookup-selection` forwards 3 new keys: `segmented`, `tokens`, `results_by_token`
-- New fixture suite: `tests/fixtures-segmentation/` (3 fixtures: zh phrase, zh single-char guard, ja phrase)
-- `tests/run_backend_fixtures.py`: extended `check_expect()` with `tokens_contains` and `tokens_length_gte` assertions
-
-## Big Bang Phase 1 (2026-05-12)
-
-- Rust tokenizer binary `dank-lookup-tokenize` at `tokenizer/` (jieba-rs 0.9 + lindera 3.0 with embedded ipadic)
-- Supports `--lang zh` (jieba-rs) and `--lang ja` (lindera/ipadic), JSON output, stdin or positional arg
-- Trial ground: `tests/tokenizer-bench/` with 10 ZH + 8 JA corpus phrases, ground truth, hit-rate comparison runner
-- Benchmark: ZH diff=0.0% (PASS — jieba-rs identical to Python jieba), JA diff=10.3% toward higher hit rate (PASS)
-- Development infrastructure only — no runtime behavior change
+- CJK phrase segmentation fallback: when a phrase has no direct dictionary entry, the optional `dank-lookup-tokenize` binary splits it into tokens and looks up each independently; first token with results fills the popup (QML backward compatible)
+- New JSON keys: `segmented` (bool), `tokens` (array), `results_by_token` (dict)
+- `bin/dank-lookup-selection` forwards segmentation keys
+- Rust tokenizer binary at `tokenizer/` (jieba-rs 0.9 + lindera 3.0/ipadic embedded); benchmark: ZH diff=0.0% vs Python jieba, JA 10.3% higher hit rate
+- New fixture suite `tests/fixtures-segmentation/` (3 fixtures); 26/26 total pass
+- `tests/run_backend_fixtures.py`: `tokens_contains` + `tokens_length_gte` assertions
 
 ## v0.6.0 (2026-05-12)
 
