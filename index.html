@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>dms-lookup — Wayland 上的離線選詞辭典</title>
+<meta name="description" content="dms-lookup: Wayland 上的離線選詞辭典。選字 → Mod+Alt+D → Material 3 卡片彈出。無 daemon、無剪貼簿監聽。" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;500;600;700&family=Noto+Sans+TC:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --primary:           #006972;
+    --on-primary:        #ffffff;
+    --primary-container: #9cf0fa;
+    --on-primary-container: #002023;
+    --bg:                #faf6ee;
+    --surface:           #fbf8f1;
+    --surface-container: #f3ede2;
+    --outline:           #d6cebf;
+    --outline-strong:    #b5ad9e;
+    --rule:              rgba(26,28,27,0.08);
+    --on-surface:        #1a1c1b;
+    --on-surface-muted:  #4a4f4e;
+    --on-surface-faint:  #6e7472;
+    --radius-card: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--on-surface);
+    font-family: "Noto Sans TC", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .serif { font-family: "Noto Serif TC", serif; }
+  .mono  { font-family: "JetBrains Mono", ui-monospace, monospace; }
+  a { color: var(--primary); text-decoration: none; }
+  a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+  .page { max-width: 900px; margin: 0 auto; padding: 56px 32px 96px; }
+  @media (max-width: 600px) { .page { padding: 32px 20px 64px; } }
+
+  /* top bar */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 56px; font-size: 13px; color: var(--on-surface-muted);
+  }
+  .topbar .wordmark { display: flex; align-items: baseline; gap: 10px; color: var(--on-surface); }
+  .topbar .wordmark .dot {
+    width: 8px; height: 8px; border-radius: 2px;
+    background: var(--primary); display: inline-block; transform: translateY(1px);
+  }
+  .topbar .wordmark .name { font-family: "JetBrains Mono", monospace; font-size: 13px; letter-spacing: 0.02em; }
+  .topbar nav { display: flex; gap: 24px; }
+  .topbar nav a { color: var(--on-surface-muted); }
+  .topbar nav a:hover { color: var(--on-surface); }
+
+  /* hero */
+  .eyebrow {
+    font-family: "JetBrains Mono", monospace; font-size: 12px;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--primary); margin-bottom: 18px;
+  }
+  h1.title {
+    font-family: "Noto Serif TC", serif; font-weight: 500;
+    font-size: clamp(40px, 6vw, 64px); line-height: 1.08;
+    letter-spacing: -0.01em; margin: 0 0 20px; color: var(--on-surface);
+  }
+  .lede {
+    font-family: "Noto Serif TC", serif; font-weight: 400;
+    font-size: clamp(17px, 2vw, 21px); line-height: 1.55;
+    color: var(--on-surface-muted); max-width: 38em; margin: 0 0 28px;
+  }
+  .hero-meta {
+    display: flex; flex-wrap: wrap; gap: 8px 18px;
+    font-family: "JetBrains Mono", monospace; font-size: 12px;
+    color: var(--on-surface-faint);
+    padding-top: 20px; border-top: 1px solid var(--rule);
+  }
+  .hero-meta span::before { content: "·  "; color: var(--outline-strong); }
+  .hero-meta span:first-child::before { content: ""; }
+
+  /* screenshot */
+  .screenshot-wrap {
+    margin: 40px 0 0; padding: 24px 24px 18px;
+    background: var(--surface-container); border-radius: var(--radius-card);
+    border: 1px solid var(--outline); display: flex; flex-direction: column; gap: 14px;
+  }
+  .screenshot-wrap img {
+    display: block; width: 100%; height: auto;
+    border-radius: 8px; border: 1px solid var(--outline); background: var(--surface);
+  }
+  .screenshot-wrap figcaption {
+    display: flex; gap: 14px; align-items: baseline;
+    font-size: 12.5px; color: var(--on-surface-muted); padding: 2px 4px 0;
+  }
+  .cap-k {
+    font-family: "JetBrains Mono", monospace; font-size: 11px;
+    letter-spacing: 0.10em; text-transform: uppercase;
+    color: var(--primary); flex: 0 0 auto;
+  }
+  .cap-v { color: var(--on-surface-faint); }
+
+  /* install */
+  .section { margin: 72px 0 0; }
+  .section-label {
+    font-family: "JetBrains Mono", monospace; font-size: 11px;
+    letter-spacing: 0.10em; text-transform: uppercase;
+    color: var(--primary); margin-bottom: 20px;
+  }
+  .install-wrap {
+    background: var(--surface-container); border: 1px solid var(--outline);
+    border-radius: var(--radius-card); padding: 24px;
+  }
+  .install-wrap p {
+    margin: 0 0 16px; color: var(--on-surface-muted); font-size: 14.5px;
+  }
+  pre.code {
+    margin: 0; background: #1c1f1f; color: #d8d3c8;
+    padding: 18px 20px; border-radius: 10px;
+    font-family: "JetBrains Mono", monospace; font-size: 13px; line-height: 1.6;
+    overflow-x: auto; border: 1px solid #2a2d2d;
+  }
+  pre.code .c-prompt  { color: #6a8b8e; user-select: none; }
+  pre.code .c-cmd     { color: #9cf0fa; }
+  pre.code .c-path    { color: #d8d3c8; }
+  pre.code .c-comment { color: #6b7170; }
+  .keybind-row {
+    display: flex; align-items: baseline; gap: 12px;
+    margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--rule); flex-wrap: wrap;
+  }
+  .k-label {
+    font-family: "JetBrains Mono", monospace; font-size: 11px;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--on-surface-faint);
+  }
+  .kbd {
+    display: inline-flex; align-items: center; padding: 3px 8px;
+    border-radius: 6px; border: 1px solid var(--outline-strong);
+    background: var(--surface); font-family: "JetBrains Mono", monospace;
+    font-size: 12px; color: var(--on-surface); box-shadow: 0 1px 0 var(--outline);
+  }
+  .plus { color: var(--on-surface-faint); font-family: "JetBrains Mono", monospace; font-size: 12px; }
+
+  /* links section */
+  .links { margin: 48px 0 0; display: flex; flex-wrap: wrap; gap: 12px; }
+  .link-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 16px; border-radius: 999px;
+    border: 1px solid var(--outline); background: var(--surface-container);
+    font-family: "JetBrains Mono", monospace; font-size: 12px;
+    color: var(--on-surface-muted); text-decoration: none;
+  }
+  .link-pill:hover { border-color: var(--primary); color: var(--primary); text-decoration: none; }
+
+  /* footer */
+  footer.foot {
+    margin-top: 88px; padding-top: 24px; border-top: 1px solid var(--rule);
+    display: flex; justify-content: space-between; align-items: baseline;
+    gap: 24px; flex-wrap: wrap;
+    font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--on-surface-faint);
+  }
+  footer.foot .foot-r { display: flex; gap: 18px; flex-wrap: wrap; }
+  footer.foot a { color: var(--on-surface-muted); }
+  footer.foot a:hover { color: var(--primary); }
+
+  ::selection { background: rgba(0,105,114,0.22); color: var(--on-surface); }
+</style>
+</head>
+<body>
+  <div class="page">
+
+    <header class="topbar">
+      <div class="wordmark">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="name">dms-lookup</span>
+      </div>
+      <nav>
+        <a href="#install">安裝</a>
+        <a href="https://github.com/Nocehi/dms-lookup/blob/main/docs/dictionary-sources.md" target="_blank" rel="noopener">字典</a>
+        <a href="https://github.com/Nocehi/dms-lookup" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+    </header>
+
+    <section class="hero">
+      <div class="eyebrow">v0.7.1 · Linux / Wayland</div>
+      <h1 class="title">Wayland 上的<br />離線選詞辭典。</h1>
+      <p class="lede">
+        選任何視窗裡的文字，按下 <span class="mono" style="color:var(--on-surface)">Mod+Alt+D</span>，
+        一張 Material Design 3 卡片居中浮現，比字典薄，比瀏覽器快，按鍵，如你所見。
+      </p>
+      <div class="hero-meta">
+        <span>無 daemon</span>
+        <span>無剪貼簿監聽</span>
+        <span>無網路請求</span>
+        <span>漢 · 粵 · 日 · 英</span>
+        <span>MIT</span>
+      </div>
+
+      <figure class="screenshot-wrap" aria-label="dms-lookup popup looking up 辭典 on the dms-lookup landing page">
+        <img src="docs/images/popup-recursive.png"
+             alt="dms-lookup popup looking up 辭典 on the dms-lookup landing page itself — han mode, 萌典重編國語辭典" />
+        <figcaption>
+          <span class="cap-k">fig.01</span>
+          <span class="cap-v">查 <span class="serif">辭典</span> on dms-lookup · han mode · 萌典重編國語辭典</span>
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="install" class="section">
+      <div class="section-label">$ &nbsp;install</div>
+      <div class="install-wrap">
+        <p>需要 niri + Dank Material Shell + <span class="mono">sdcv</span>。字典需另行安裝（見 <a href="https://github.com/Nocehi/dms-lookup/blob/main/docs/dictionary-sources.md">dictionary-sources.md</a>）。</p>
+<pre class="code"><span class="c-prompt">$ </span><span class="c-cmd">git clone</span> <span class="c-path">https://github.com/Nocehi/dms-lookup</span>
+<span class="c-prompt">$ </span><span class="c-cmd">bash</span> <span class="c-path">dms-lookup/packaging/install-user.sh</span>
+<span class="c-prompt">$ </span><span class="c-cmd">dms ipc call plugins reload</span> <span class="c-path">dankLookup</span></pre>
+        <div class="keybind-row">
+          <span class="k-label">trigger</span>
+          <span class="kbd">Mod</span><span class="plus">+</span>
+          <span class="kbd">Alt</span><span class="plus">+</span>
+          <span class="kbd">D</span>
+        </div>
+      </div>
+    </section>
+
+    <div class="links">
+      <a class="link-pill" href="README.md">README</a>
+      <a class="link-pill" href="CHANGELOG.md">CHANGELOG</a>
+      <a class="link-pill" href="https://github.com/Nocehi/dms-lookup/blob/main/docs/dictionary-sources.md" target="_blank" rel="noopener">字典授權與安裝</a>
+      <a class="link-pill" href="https://github.com/Nocehi/dms-lookup/blob/main/docs/niri-dms-install.md" target="_blank" rel="noopener">niri 設定</a>
+      <a class="link-pill" href="https://github.com/Nocehi/dms-lookup/blob/main/docs/privacy.md" target="_blank" rel="noopener">隱私</a>
+      <a class="link-pill" href="https://github.com/Nocehi/dms-lookup/blob/main/docs/json-schema.md" target="_blank" rel="noopener">JSON schema</a>
+    </div>
+
+    <footer class="foot">
+      <div class="foot-l">© 2026 Nocehi · MIT License</div>
+      <div class="foot-r">
+        <a href="https://github.com/Nocehi/dms-lookup" target="_blank" rel="noopener">github.com/Nocehi/dms-lookup</a>
+      </div>
+    </footer>
+
+  </div>
+</body>
+</html>

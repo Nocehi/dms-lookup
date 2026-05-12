@@ -90,7 +90,7 @@ def run_sdcv(dict_name, query_text, data_dir=None):
         out = result.stdout.strip()
         if out and out != "[]":
             return json.loads(out)
-    except:
+    except Exception:
         pass
     return []
 
@@ -102,7 +102,7 @@ def run_unfiltered(query_text):
         out = result.stdout.strip()
         if out and out != "[]":
             return json.loads(out)
-    except:
+    except Exception:
         pass
     return []
 
@@ -151,9 +151,10 @@ def source_key(entry):
     return 0 if "gcide" in dn or "webster" in dn else 1
 
 # === Mode loop (reusable per query or per token) ===
-def lookup_query(query_text, cfg):
+def lookup_query(query_text, cfg, lang=None):
     """Return (results_by_mode, related_by_mode, mode_preferences, available_modes)."""
-    lang = classify(query_text)
+    if lang is None:
+        lang = classify(query_text)
     results_by_mode = {}
     related_by_mode = {}
     mode_preferences = {}
@@ -214,7 +215,7 @@ def lookup_query(query_text, cfg):
 
 # === Main lookup ===
 lang = classify(QUERY)
-results_by_mode, related_by_mode, mode_preferences, available_modes = lookup_query(QUERY, cfg)
+results_by_mode, related_by_mode, mode_preferences, available_modes = lookup_query(QUERY, cfg, lang=lang)
 
 # === Segmentation fallback ===
 segmented = False
@@ -232,7 +233,7 @@ if not available_modes:
                 [TOKENIZER, "--lang", tok_lang, "--json", QUERY],
                 capture_output=True, text=True, timeout=10)
             tokens = json.loads(tok_result.stdout).get("tokens", [])
-        except:
+        except Exception:
             tokens = []
 
         if len(tokens) > 1:

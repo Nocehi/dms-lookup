@@ -496,7 +496,7 @@ PluginComponent {
                         width: parent.width
                         text: root.dataLoaded && root.queryText
                             ? "No definition found"
-                            : "Select text and run dank-lookup-selection"
+                            : "選取文字後按 Mod+Alt+D"
                         color: Theme.surfaceText
                         opacity: 0.5
                         font.pixelSize: 13
