@@ -35,11 +35,9 @@ chmod +x $HOME/.local/bin/dank-lookup-selection
 
 ```
 Mod+Alt+D → spawn dank-lookup-selection
-              ├─ cooldown (700ms): multi-spawn guard
               ├─ wl-paste: primary → clipboard fallback
-              ├─ backend sdcv.sh: language detect → XDICT routing
-              ├─ atomic write: latest.json.tmp → mv → latest.json
-              └─ debug.log: per-execution trace
+              ├─ backend sdcv.sh: language classify → mode routing
+              └─ atomic write: latest.json.tmp → mv → latest.json
 
 DankLookup.qml (Timer 300ms, popup-hidden only)
   └─ FileView (Qt.createQmlObject, fresh per read)
@@ -75,71 +73,45 @@ niri floats and positions the popup naturally. Located in `~/.config/niri/dms/wi
 |------|---------|
 | `~/.config/DankMaterialShell/plugins/dankLookup/` | Plugin directory |
 | `~/.local/bin/dank-lookup-selection` | Selection probe script |
-| `~/.local/lib/dank-lookup/backends/sdcv.sh` | Backend adapter (sdcv + XDICT, 4-category language routing) |
+| `~/.local/lib/dank-lookup/backends/sdcv.sh` | Backend adapter |
 | `~/.local/lib/dank-lookup/backends/mock.sh` | Pure mock fallback |
 | `~/.config/niri/dms/binds.kdl` | Keybind |
 | `~/.config/niri/dms/windowrules.kdl` | Floating window rule |
-| `/tmp/dank-lookup/latest.json` | Lookup result (runtime) |
-| `/tmp/dank-lookup/debug.log` | Execution log (runtime) |
+| `/tmp/dank-lookup/latest.json` | Lookup result (runtime, tmpfs) |
 
 ## Backend
 
-### sdcv with XDICT dictionaries (current)
+The backend uses `sdcv --json` with user-scope and system dictionaries. Language is auto-detected and routed to the appropriate mode:
 
-The plugin now uses `sdcv --json` with two user-scope dictionaries in `~/.local/share/stardict/dic/`:
+| Class | Detection | Default mode |
+|-------|----------|--------------|
+| CJK | Han characters | 漢語 (萌典 + CC-CEDICT) |
+| Kana | Hiragana / Katakana | ja (JMdict + reader.dict) |
+| Latin | ASCII alpha first char | han-en (XDICT英漢) |
+| Mixed | CJK + Latin | han-en |
+| Unknown | Emoji / punctuation / numbers | — (mock fallback) |
 
-| Dictionary | Lookup direction | Word count |
-|------------|-----------------|------------|
-| XDICT英漢辭典 | English → Chinese (auto-selected for ASCII queries) | 174,049 |
-| XDICT漢英辭典 | Chinese → English (auto-selected for non-ASCII queries) | 158,137 |
-| dictd_www.dict.org_gcide | English monolingual (en-en exact / detailed Webster-style entries) | 174,222 |
-| WordNet | English monolingual (en-en exact fallback / companion source) | 149,535 |
+Supported dictionaries (user installs separately — see `docs/dictionary-sources.md`):
 
-The backend automatically detects the query language and picks the right dictionary:
+| Dictionary | Mode | Words |
+|------------|------|-------|
+| 萌典重編國語辭典 | han | 161,194 |
+| CC-CEDICT 漢英辭典 | han | 122,437 |
+| words.hk 粵語詞典 | yue | 16,204 |
+| reader.dict JA | ja | 100,036 |
+| JMdict | ja | 412,413 |
+| XDICT英漢辭典 | han-en | 174,049 |
+| XDICT漢英辭典 | han-en | 158,137 |
+| dictd_www.dict.org_gcide | en-en | 174,222 |
+| WordNet | en-en | 149,535 |
+| English Wiktionary | en-en | 1,306,573 |
+| FreeDict+WikDict eng-zho | han-en fallback | 26,660 |
 
-| Category | Detection | Primary dict | Mode |
-|----------|----------|-------------|------|
-| Latin (en) | ASCII alpha first char | XDICT英漢辭典 | 漢英 |
-| CJK (zh) | Han characters only | 萌典重編國語辭典 + XDICT漢英辭典 | 漢語 / 漢英 |
-| Mixed | CJK + Latin | unfiltered → both dicts | auto |
-| Kana (ja) | Hiragana/Katakana | unfiltered → mock (JMdict planned) | — |
-
-For CJK queries, the popup defaults to 漢語 (萌典). For Latin queries, it defaults to 漢英 (XDICT), with 英英 available as a second mode. The 英英 mode queries GCIDE and WordNet, then splits exact matches from fuzzy / nearby entries. Exact results stay in the default definition body; fuzzy entries are exposed through `related_by_mode` and the optional Related toggle.
-
-If the primary dict returns no result, it tries the secondary, then falls back to an unfiltered `sdcv` query. Mock mode is the last resort.
-
-> The English-中文 FreeDict dictionary (26,660 words) is also available in the unfiltered fallback path.
+Multi-word CJK phrases with no direct match are split into tokens by the optional `dank-lookup-tokenize` Rust binary (jieba-rs + lindera) and looked up per-token.
 
 ### Mock mode (fallback)
 
 When no dictionary backend is installed or no definition is found, the probe returns a mock result.
-
-## Version
-
-| Version | Changes |
-|---------|---------|
-| V1 | Mock backend, `FloatingWindow` popup, `Mod+Alt+D` keybind, file-based signal |
-| V2a | sdcv backend with XDICT user-scope dictionaries, 3-tier fallback |
-| V2b | Language routing (latin/CJK/kana/mixed), MD3 card UI, segmented mode row, Asebi Mincho title |
-| V2c | Mono dictionary routing: `results_by_mode` contract, 漢語→萌典, 漢英→XDICT, 英英→GCIDE/WordNet |
-| V2d | UI polish: larger card, title inset, serif title split, taller scroll body |
-| V2e | Latency and body typography: 300ms file check, 700ms cooldown, 0.25s wl-paste timeouts, body line-height |
-| V2f | Source-specific cleanup: conservative GCIDE/Webster whitespace, `[1913 Webster]` cleanup, scroll overflow arrow, scroll-position reset, GCIDE/WordNet exact-match ranking |
-| V0.4.3 | Result quality policy: exact entries in main body, fuzzy entries in `related_by_mode`, Related toggle |
-| V0.4.4 | File-based source config support in backend, `DANK_LOOKUP_CONFIG` override, Python-owned `sdcv` subprocess planning |
-| V0.4.4a | Integration fix: `latest.json` passes backend metadata through; QML resets mode state on new data |
-| V0.4.4b | Backend fixture tests for routing, exact/related split, 萌典, XDICT, and user-scope `STARDICT_DATA_DIR` behavior |
-| V0.4.5 | Locale-agnostic UI labels: `modeLabels` removed; labels from `results_by_mode[mode].label` |
-| V0.4.5a | Config-driven segment visibility: dynamic `availableModes` Repeater model |
-| V0.4.6 | Single-mode pill + Copy (clipboard) + Open-full (xdg-open) actions |
-| Big Bang | Concept: jieba segmentation fallback for multi-word CJK selections |
-| V0.4.7 | ja-ja (reader.dict JA) + yue-yue (words.hk) dictionary deployment; new config modes |
-| V0.4.7b | Test infrastructure: `DANK_LOOKUP_OUTPUT` per-test output isolation; ja/yue optional fixture set |
-| V0.4.8 | Mode routing policy: 8 reading-routing fixtures confirm CJK routing matches design principles; no backend changes needed |
-| V0.4.9 | Risk hardening: classify() unknown fallback, dictionary redistribution labels, CI-minimal config, pre-release check script |
-| V0.5.0 | Proposal: state-per-control + T.Templates refactor (planned) |
-| V0.5.0a | Component refactor: inline `T.Button` replaces close/C/F from `Rectangle` + `MouseArea` |
-| V0.5.0b | Copy action fix: `Qt.application.clipboard` → `wl-copy` via Process |
 
 ## Config
 
@@ -155,32 +127,26 @@ Override for testing:
 DANK_LOOKUP_CONFIG=/path/to/config.json $HOME/.local/lib/dank-lookup/backends/sdcv.sh Linux
 ```
 
-If no config exists, the backend uses built-in defaults matching the current local behavior.
-
-Known orthography note:
-
-```text
-臺灣 -> 漢語 / 萌典
-台灣 -> 漢英 / XDICT漢英辭典
-```
+If no config exists, the backend uses built-in defaults. See `docs/json-schema.md` for the full output contract.
 
 ## Backend Fixtures
 
-Run:
+Run from the repo root after installing:
 
 ```bash
-$HOME/.local/lib/dank-lookup/tests/run_backend_fixtures.py
+# CI baseline (portable — only needs GCIDE + WordNet)
+DANK_LOOKUP_CONFIG=tests/configs/ci-minimal.json \
+  python3 tests/run_backend_fixtures.py tests/fixtures-ci-minimal
+
+# Full local suites
+python3 tests/run_backend_fixtures.py tests/fixtures
+python3 tests/run_backend_fixtures.py tests/fixtures-ja-yue
+python3 tests/run_backend_fixtures.py tests/fixtures-reading-routing
+python3 tests/run_backend_fixtures.py tests/fixtures-risk-hardening
+python3 tests/run_backend_fixtures.py tests/fixtures-segmentation
 ```
 
-Current local result:
-
-```text
-4/4 passed
-```
-
-The fixture runner is sequential because the backend writes a shared runtime file at `/tmp/dank-lookup/backend_result.json`.
-
-The default fixture suite is expected to pass with built-in/default config. A deliberately restrictive config can fail these fixtures; that confirms config filtering is active.
+Each fixture writes to its own output file via `DANK_LOOKUP_OUTPUT` — concurrent runs do not collide.
 
 ## Uninstall
 
@@ -196,7 +162,7 @@ Also remove the keybind from `~/.config/niri/dms/binds.kdl` and the window rule 
 
 ## Privacy
 
-All processing is local. No network requests. No clipboard monitoring. No daemon processes.
+All processing is local. No network requests. No clipboard monitoring. No daemon processes. See `docs/privacy.md`.
 
 ## Dictionaries
 
