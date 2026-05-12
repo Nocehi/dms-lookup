@@ -52,6 +52,7 @@ dank-lookup/
 ├── plugin/                 DMS plugin (plugin.json, DankLookup.qml)
 ├── bin/                    Selection probe script
 ├── lib/backends/           Backend adapter (sdcv.sh, mock.sh)
+├── tokenizer/              Optional Rust tokenizer (jieba-rs + lindera)
 ├── tests/                  Backend fixture tests
 ├── docs/                   Documentation
 │   ├── dictionary-sources.md
@@ -69,20 +70,37 @@ dank-lookup/
 - `docs/privacy.md` — privacy design principles
 - `docs/materialdesign3manual.md` — UI design reference
 
+## CJK phrase segmentation (optional)
+
+When looking up multi-character CJK phrases that have no direct dictionary entry, dank-lookup can split the phrase into tokens and look up each independently. This requires the `dank-lookup-tokenize` Rust binary (jieba-rs + lindera).
+
+```bash
+cd tokenizer && cargo build --release
+install -Dm755 target/release/dank-lookup-tokenize \
+  ~/.local/lib/dank-lookup/dank-lookup-tokenize
+```
+
+Without the tokenizer, phrases with no direct match fall back to a mock result.
+
 ## Backend fixtures
+
+Fixtures exercise the deployed backend (`~/.local/lib/dank-lookup/backends/sdcv.sh`). Run from the repo root after installing.
 
 ### CI baseline (portable — only needs GCIDE + WordNet)
 
 ```bash
-DANK_LOOKUP_CONFIG=/path/to/dank-lookup/tests/configs/ci-minimal.json \
-  python3 ~/.local/lib/dank-lookup/tests/run_backend_fixtures.py \
-  ~/.local/lib/dank-lookup/tests/fixtures-ci-minimal
+DANK_LOOKUP_CONFIG=tests/configs/ci-minimal.json \
+  python3 tests/run_backend_fixtures.py tests/fixtures-ci-minimal
 ```
 
 ### Local baseline (requires full local dictionary set)
 
 ```bash
-python3 ~/.local/lib/dank-lookup/tests/run_backend_fixtures.py
+python3 tests/run_backend_fixtures.py tests/fixtures
+python3 tests/run_backend_fixtures.py tests/fixtures-ja-yue
+python3 tests/run_backend_fixtures.py tests/fixtures-reading-routing
+python3 tests/run_backend_fixtures.py tests/fixtures-risk-hardening
+python3 tests/run_backend_fixtures.py tests/fixtures-segmentation
 ```
 
 ## Privacy

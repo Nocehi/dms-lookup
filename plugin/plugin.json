@@ -2,7 +2,7 @@
   "id": "dankLookup",
   "name": "Dank Lookup",
   "description": "Local selection dictionary lookup popup for DMS",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "author": "local",
   "type": "launcher",
   "capabilities": ["lookup", "selection", "dictionary"],
