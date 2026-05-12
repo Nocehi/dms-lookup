@@ -80,6 +80,9 @@ result = {
   "related_by_mode": br.get("related_by_mode"),
   "mode_preferences": br.get("mode_preferences"),
   "config": br.get("config"),
+  "segmented": br.get("segmented"),
+  "tokens": br.get("tokens"),
+  "results_by_token": br.get("results_by_token"),
   "results": [
     {
       "title": br.get("title", os.environ["QUERY"]),

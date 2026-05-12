@@ -27,6 +27,12 @@ Thumbs.db
 __pycache__/
 *.pyc
 
+# Rust build output
+tokenizer/target/
+
+# Generated ground truth (hand-annotated ja-manual.json is checked in)
+tests/tokenizer-bench/ground-truth/zh-jieba.json
+
 # Development notes — not for end users
 notes/
 

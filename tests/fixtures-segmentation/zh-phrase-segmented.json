@@ -1,0 +1,10 @@
+{
+  "query": "為甚麼會這樣",
+  "expect": {
+    "backend": "sdcv",
+    "segmented": true,
+    "tokens_length_gte": 2,
+    "tokens_contains": ["甚麼"],
+    "available_modes_contains": ["han"]
+  }
+}

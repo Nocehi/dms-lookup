@@ -1,0 +1,8 @@
+{
+  "query": "食べたくない",
+  "expect": {
+    "backend": "sdcv",
+    "segmented": true,
+    "tokens_length_gte": 2
+  }
+}

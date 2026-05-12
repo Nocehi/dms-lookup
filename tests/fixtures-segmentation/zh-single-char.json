@@ -1,0 +1,8 @@
+{
+  "query": "機",
+  "expect": {
+    "backend": "sdcv",
+    "segmented": false,
+    "available_modes_contains": ["han"]
+  }
+}

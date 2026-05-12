@@ -77,14 +77,14 @@ else:
     cfg = default_config()
 
 # === sdcv runner ===
-def run_sdcv(dict_name, data_dir=None):
+def run_sdcv(dict_name, query_text, data_dir=None):
     cmd = ["sdcv", "-n", "--json"]
     env = os.environ.copy()
     if data_dir:
         cmd += ["--data-dir", data_dir]
     else:
         env.setdefault("STARDICT_DATA_DIR", os.path.expanduser("~/.local/share/stardict/dic"))
-    cmd += ["--use-dict", dict_name, QUERY]
+    cmd += ["--use-dict", dict_name, query_text]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, env=env)
         out = result.stdout.strip()
@@ -94,11 +94,11 @@ def run_sdcv(dict_name, data_dir=None):
         pass
     return []
 
-def run_unfiltered():
+def run_unfiltered(query_text):
     env = os.environ.copy()
     env.setdefault("STARDICT_DATA_DIR", os.path.expanduser("~/.local/share/stardict/dic"))
     try:
-        result = subprocess.run(["sdcv", "-n", "--json", QUERY], capture_output=True, text=True, timeout=5, env=env)
+        result = subprocess.run(["sdcv", "-n", "--json", query_text], capture_output=True, text=True, timeout=5, env=env)
         out = result.stdout.strip()
         if out and out != "[]":
             return json.loads(out)
@@ -143,81 +143,127 @@ def build_body(entries, max_entry_chars=4000, max_body_chars=12000):
         total += len(section)
     return "\n\n".join(parts), dicts
 
-def is_exact(entry):
-    return str(entry.get("word", "")).strip().casefold() == QUERY.strip().casefold()
+def is_exact(entry, query_text):
+    return str(entry.get("word", "")).strip().casefold() == query_text.strip().casefold()
 
 def source_key(entry):
     dn = str(entry.get("dict", "")).lower()
     return 0 if "gcide" in dn or "webster" in dn else 1
 
-# === Collect entries per mode ===
-lang = classify(QUERY)
-results_by_mode = {}
-related_by_mode = {}
-mode_preferences = {}
-available_modes = []
+# === Mode loop (reusable per query or per token) ===
+def lookup_query(query_text, cfg):
+    """Return (results_by_mode, related_by_mode, mode_preferences, available_modes)."""
+    lang = classify(query_text)
+    results_by_mode = {}
+    related_by_mode = {}
+    mode_preferences = {}
+    available_modes = []
 
-for mode_key, mode_cfg in cfg.get("modes", {}).items():
-    if not mode_cfg.get("enabled", True):
-        continue
+    for mode_key, mode_cfg in cfg.get("modes", {}).items():
+        if not mode_cfg.get("enabled", True):
+            continue
 
-    # Skip if no sources match this query language
-    sources_for_mode = [s for s in mode_cfg.get("sources", [])
-                        if s.get("when", "any") == "any" or
-                           (s.get("when") == "cjk" and lang in ("cjk", "mixed")) or
-                           s.get("when") == lang]
-    if not sources_for_mode:
-        continue
+        sources_for_mode = [s for s in mode_cfg.get("sources", [])
+                            if s.get("when", "any") == "any" or
+                               (s.get("when") == "cjk" and lang in ("cjk", "mixed")) or
+                               s.get("when") == lang]
+        if not sources_for_mode:
+            continue
 
-    all_entries = []
-    for source in sources_for_mode:
-        dir_override = os.path.expanduser(source["data_dir"]) if source.get("data_dir") else None
-        entries = run_sdcv(source["name"], dir_override)
-        all_entries.extend(entries)
+        all_entries = []
+        for source in sources_for_mode:
+            dir_override = os.path.expanduser(source["data_dir"]) if source.get("data_dir") else None
+            entries = run_sdcv(source["name"], query_text, dir_override)
+            all_entries.extend(entries)
 
-    # Unfiltered fallback only for han-en mode
-    if not all_entries and mode_key == "han-en" and cfg.get("fallback", {}).get("unfiltered"):
-        unfiltered = run_unfiltered()
-        if unfiltered:
-            all_entries.extend(unfiltered)
+        if not all_entries and mode_key == "han-en" and cfg.get("fallback", {}).get("unfiltered"):
+            unfiltered = run_unfiltered(query_text)
+            if unfiltered:
+                all_entries.extend(unfiltered)
 
-    if not all_entries:
-        continue
+        if not all_entries:
+            continue
 
-    # Sort: exact first, then GCIDE priority within same exactness
-    all_entries.sort(key=lambda e: (0 if is_exact(e) else 1, source_key(e)))
+        all_entries.sort(key=lambda e: (0 if is_exact(e, query_text) else 1, source_key(e)))
 
-    exact = [e for e in all_entries if is_exact(e)]
-    fuzzy = [e for e in all_entries if not is_exact(e)]
+        exact = [e for e in all_entries if is_exact(e, query_text)]
+        fuzzy = [e for e in all_entries if not is_exact(e, query_text)]
 
-    body, dicts = build_body(exact)
-    if body:
-        results_by_mode[mode_key] = {
-            "label": mode_cfg.get("label", mode_key),
-            "subtitle": ", ".join(sorted(dicts)),
-            "body": body
-        }
-        available_modes.append(mode_key)
-
-    # Related: only if at least one source in this mode allows it
-    allow_rel = any(s.get("allow_related", False) for s in mode_cfg.get("sources", []))
-    if allow_rel and fuzzy:
-        rel_body, rel_dicts = build_body(fuzzy)
-        if rel_body:
-            related_by_mode[mode_key] = {
-                "label": "Related",
-                "subtitle": ", ".join(sorted(rel_dicts)),
-                "body": rel_body
+        body, dicts = build_body(exact)
+        if body:
+            results_by_mode[mode_key] = {
+                "label": mode_cfg.get("label", mode_key),
+                "subtitle": ", ".join(sorted(dicts)),
+                "body": body
             }
+            available_modes.append(mode_key)
 
-    mode_preferences[mode_key] = {"show_related": mode_cfg.get("show_related", False)}
+        allow_rel = any(s.get("allow_related", False) for s in mode_cfg.get("sources", []))
+        if allow_rel and fuzzy:
+            rel_body, rel_dicts = build_body(fuzzy)
+            if rel_body:
+                related_by_mode[mode_key] = {
+                    "label": "Related",
+                    "subtitle": ", ".join(sorted(rel_dicts)),
+                    "body": rel_body
+                }
 
-# === Default mode selection ===
+        mode_preferences[mode_key] = {"show_related": mode_cfg.get("show_related", False)}
+
+    return results_by_mode, related_by_mode, mode_preferences, available_modes
+
+# === Main lookup ===
+lang = classify(QUERY)
+results_by_mode, related_by_mode, mode_preferences, available_modes = lookup_query(QUERY, cfg)
+
+# === Segmentation fallback ===
+segmented = False
+tokens = []
+results_by_token = {}
+
 if not available_modes:
+    TOKENIZER = os.path.expanduser("~/.local/lib/dank-lookup/dank-lookup-tokenize")
+    LANG_MAP = {"cjk": "zh", "kana": "ja", "mixed": "zh"}
+    tok_lang = LANG_MAP.get(lang)
+
+    if tok_lang and len(QUERY) > 1 and os.path.isfile(TOKENIZER):
+        try:
+            tok_result = subprocess.run(
+                [TOKENIZER, "--lang", tok_lang, "--json", QUERY],
+                capture_output=True, text=True, timeout=10)
+            tokens = json.loads(tok_result.stdout).get("tokens", [])
+        except:
+            tokens = []
+
+        if len(tokens) > 1:
+            first_hit = None
+            first_hit_data = None
+            for token in tokens:
+                r, rel, mp, am = lookup_query(token, cfg)
+                tok_cls = classify(token)
+                tok_cands = [m for m in cfg.get("modes", {})
+                             if tok_cls in cfg["modes"][m].get("default_for", []) and m in am]
+                tok_default = tok_cands[0] if tok_cands else (am[0] if am else None)
+                results_by_token[token] = {
+                    "default_mode": tok_default,
+                    "available_modes": am,
+                    "results_by_mode": r,
+                    "related_by_mode": rel,
+                }
+                if am and first_hit is None:
+                    first_hit = token
+                    first_hit_data = (r, rel, mp, am)
+
+            if first_hit:
+                segmented = True
+                results_by_mode, related_by_mode, mode_preferences, available_modes = first_hit_data
+
+if not segmented and not available_modes:
     if cfg.get("fallback", {}).get("mock"):
         json.dump({"backend":"mock","title":QUERY,"subtitle":"mock result until sdcv is configured","body":"Install or configure a local dictionary backend for real definitions."}, sys.stdout, indent=2, ensure_ascii=False)
     sys.exit(0)
 
+# === Default mode selection ===
 candidates = [m for m in cfg.get("modes", {}) if lang in cfg["modes"][m].get("default_for", []) and m in available_modes]
 default_mode = candidates[0] if candidates else available_modes[0]
 
@@ -227,6 +273,7 @@ dm = results_by_mode.get(default_mode, results_by_mode[available_modes[0]])
 output = {
     "backend": "sdcv",
     "title": QUERY,
+    "segmented": segmented,
     "default_mode": default_mode,
     "available_modes": available_modes,
     "subtitle": dm["subtitle"],
@@ -236,5 +283,8 @@ output = {
     "mode_preferences": mode_preferences,
     "config": {"path": CONFIG_PATH, "loaded": config_loaded, "warning": config_warning}
 }
+if segmented:
+    output["tokens"] = tokens
+    output["results_by_token"] = results_by_token
 json.dump(output, sys.stdout, indent=2, ensure_ascii=False)
 ' "$query" > "$out_file"

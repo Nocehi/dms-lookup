@@ -66,6 +66,20 @@ def check_expect(data, expect, prefix="errors"):
                 if found:
                     errors.append(f"{label}: should not contain {found}")
 
+        elif key == "tokens_contains":
+            actual = data.get("tokens", [])
+            if not isinstance(actual, list):
+                errors.append(f"{label}: not a list ({type(actual).__name__})")
+            else:
+                missing = [t for t in val if t not in actual]
+                if missing:
+                    errors.append(f"{label}: missing tokens {missing} (have {actual})")
+
+        elif key == "tokens_length_gte":
+            actual = data.get("tokens", [])
+            if not isinstance(actual, list) or len(actual) < val:
+                errors.append(f"{label}: expected >= {val} tokens, got {len(actual) if isinstance(actual, list) else 'non-list'}")
+
         elif val is None:
             if get_at(data, key) is not None:
                 errors.append(f"{label}: expected null, got {get_at(data, key)!r}")
