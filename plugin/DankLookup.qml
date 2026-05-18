@@ -35,8 +35,10 @@ PluginComponent {
         return false
     }
 
-    function titleFontFamily() {
-        return hasCjkOrKana(queryText) ? "Asebi Mincho" : "Noto Serif"
+    function titleFontFamilies() {
+        return hasCjkOrKana(queryText)
+            ? ["Asebi Mincho", "Noto Serif CJK TC", "MiSans TC"]
+            : ["Noto Serif", "Noto Serif CJK TC"]
     }
 
     Component.onCompleted: {
@@ -239,7 +241,7 @@ PluginComponent {
                             y: 4
                             width: parent.width - 28 - 24
                             text: root.queryText
-                            font.family: root.titleFontFamily()
+                            font.families: root.titleFontFamilies()
                             font.pixelSize: root.hasCjkOrKana(root.queryText) ? 26 : 24
                             font.weight: Font.Normal
                             lineHeight: 1.12
