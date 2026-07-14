@@ -1,6 +1,11 @@
 # dankLookup Material Design 3 manual
 
-用途：給 opencode 作為 dankLookup V2b UI 改造手冊。這份手冊不是要做 landing page，而是把現有 DMS popup 做成更接近 Material Design 3 的查詞卡片：清楚、可掃讀、可切換詞典來源，且保留 Dank Material Shell / matugen 的既有視覺語言。
+用途：保留 Dank Lookup 詞典卡片的 Material Design 3 設計依據。現行產品是 standalone-first；共享 `qml/` 不依賴 DMS，內建 light/dark palette 並可讀 generic matugen JSON。文中舊有 DMS token／prototype 描述只可視為視覺參考；DMS `Theme.*` 現在只由 optional compatibility wrapper 映射到最小 theme contract。
+
+現行 theme contract 是 `primary`、`on_primary`、`surface`、
+`surface_container_high`、`on_surface`、`outline`、`dark`。實作與生命週期
+真相以 `qml/LookupCard.qml`、`qml/LookupController.qml` 及
+`docs/json-schema.md` 為準，不以此手冊的歷史 prototype 片段為準。
 
 ## Sources checked
 
@@ -373,70 +378,20 @@ Avoid:
 - animating the card border, shadow, or radius
 - motion longer than 250ms total for any single transition
 
-## Backend contract for future UI
+## Current implementation boundary
 
-Current contract:
+This file is a visual-design reference, not a backend schema or implementation
+plan. The shipped controller/card use schema 2 from `docs/json-schema.md`, show
+all exact modes that produced useful results, keep Related separate, and render
+plain text inside a bounded scrollable card.
 
-```json
-{
-  "backend": "sdcv",
-  "title": "consolidate",
-  "subtitle": "XDICT英漢辭典",
-  "body": "[XDICT英漢辭典]\n..."
-}
-```
+The current appearance transition is 170 ms and does not gate content updates.
+Loading shimmer transitions are 220 ms. Copy/Open act on the active exact,
+related, or indexed token result. Missing dictionaries make a mode unavailable;
+they do not crash or remove the standalone frontend.
 
-Recommended V2b-compatible extension:
-
-```json
-{
-  "backend": "sdcv",
-  "title": "consolidate",
-  "subtitle": "XDICT英漢辭典",
-  "body": "[XDICT英漢辭典]\n...",
-  "mode": "han-en",
-  "sources": ["XDICT英漢辭典"],
-  "available_modes": ["han-en"]
-}
-```
-
-Do not break V2a QML. Add fields only; keep `title` / `subtitle` / `body`.
-
-## Implementation plan for opencode
-
-Phase UI-1: QML-only visual update
-
-- Keep backend unchanged.
-- Replace plain popup layout with header + segmented row + source label + scroll body.
-- Use `Asebi Mincho` for query title only.
-- Keep body as `Text.PlainText`.
-- Keep popup size compact.
-
-Phase UI-2: Mode state
-
-- Add `activeMode`.
-- Add disabled-looking segments for missing modes.
-- Current backend result maps to `漢語`, `漢英`, or `英英` depending on query classification and available dictionary hits.
-
-Phase UI-3: Backend multi-mode
-
-- Extend backend JSON with `default_mode`, `available_modes`, and `results_by_mode`.
-- `en-en` is available through GCIDE with WordNet fallback.
-- `han` is available through 萌典重編國語辭典 for Chinese entries.
-
-## Acceptance checklist
-
-- Popup remains floating and centered under niri.
-- No repeated popup.
-- No QML `checkForUpdate error`.
-- Query title uses `Asebi Mincho` for CJK / Japanese and `Noto Serif` for Latin.
-- Body remains readable at 14px with scroll.
-- Segmented row does not overflow at `implicitWidth: 520`.
-- English `consolidate` shows XDICT first.
-- English `consolidate` can switch to `英英` and show GCIDE/WordNet content.
-- Chinese `字典` / `正常` can switch between available `漢語` and `漢英` results.
-- Missing mode does not crash UI.
-- Query zone and result zone are separated by a single thin rule below pronunciation.
-- Popup appears with scale+opacity animation (~200ms), no instant pop-in.
-- Popup dismisses with opacity fade (~150ms), no lingering.
-- Mode switch cross-fades body content without animating segmented row or source label.
+Font availability is treated as an environment detail. The UI uses a safe
+fallback stack rather than requiring a private font or a particular locally
+deployed dictionary. Validate observable behavior with `tests/run_qml_smoke.py`
+and latency with `tests/benchmark_ui.py`; do not revive the removed prototype
+phases or their machine-specific acceptance claims.

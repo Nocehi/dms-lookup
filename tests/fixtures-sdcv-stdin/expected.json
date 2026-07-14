@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "exact": {
+    "word": ["fixture-a exact english"],
+    "漢字": ["fixture-a han unicode"],
+    "かな": ["fixture-a ja unicode"],
+    "粵語": ["fixture-a yue unicode"]
+  },
+  "multi_dictionary_word": [
+    "fixture-a exact english",
+    "fixture-b exact english"
+  ],
+  "exact_miss": "definitely-absent",
+  "fuzzy_query": "/wrod",
+  "fuzzy_expected_headword": "word"
+}

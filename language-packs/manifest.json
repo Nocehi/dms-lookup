@@ -1,0 +1,134 @@
+{
+  "schema_version": 2,
+  "policy": {
+    "dictionary_payload_included": false,
+    "automatic_downloads": false,
+    "network_install_supported": false,
+    "license_claims_are_verified": false,
+    "note": "This manifest describes local StarDict names and routing only. It does not grant redistribution rights.",
+    "definition_format": {
+      "source_override_values": ["html", "plain"],
+      "automatic": "Match .ifo bookname to dictionary_name exactly, then accept only sametypesequence=h as HTML or sametypesequence=m as plain text.",
+      "fallback": "Conflicts, mixed or unknown sequences, missing metadata, and missing .ifo files are plain text. Content is never guessed as HTML."
+    }
+  },
+  "modes": {
+    "han": {
+      "label": "漢語",
+      "dictionary_ids": ["moedict-revised", "cc-cedict", "xdict-han-en"]
+    },
+    "en": {
+      "label": "English",
+      "dictionary_ids": ["wiktionary-en-en", "gcide", "wordnet", "freedict-en-zh", "xdict-en-han"]
+    },
+    "ja": {
+      "label": "日本語",
+      "dictionary_ids": ["jmdict", "reader-dict-ja"]
+    },
+    "yue": {
+      "label": "粵語",
+      "dictionary_ids": ["words-hk"]
+    }
+  },
+  "dictionaries": [
+    {
+      "id": "moedict-revised",
+      "dictionary_name": "萌典重編國語辭典",
+      "modes": ["han"],
+      "redistribution": "unverified",
+      "license": "unverified",
+      "payload_included": false,
+      "note": "No redistribution claim is made until the exact converted artifact and its terms are verified."
+    },
+    {
+      "id": "cc-cedict",
+      "dictionary_name": "CC-CEDICT 漢英辭典",
+      "modes": ["han"],
+      "redistribution": "unverified",
+      "license": "unverified",
+      "payload_included": false,
+      "note": "Verify the exact artifact, converter, attribution, and current upstream terms before redistribution."
+    },
+    {
+      "id": "xdict-han-en",
+      "dictionary_name": "XDICT漢英辭典",
+      "modes": ["han"],
+      "redistribution": "unverified",
+      "license": "unknown",
+      "payload_included": false,
+      "note": "User-installed only; do not bundle while the license is unresolved."
+    },
+    {
+      "id": "wiktionary-en-en",
+      "dictionary_name": "wikt-en-en-2025-10-05",
+      "modes": ["en"],
+      "redistribution": "unverified",
+      "license": "unverified",
+      "payload_included": false,
+      "note": "The exact generated artifact and attribution chain have not been verified by this package."
+    },
+    {
+      "id": "gcide",
+      "dictionary_name": "dictd_www.dict.org_gcide",
+      "modes": ["en"],
+      "redistribution": "unverified",
+      "license": "unverified",
+      "payload_included": false,
+      "note": "Package metadata may provide license evidence, but this repository does not bundle or certify the payload."
+    },
+    {
+      "id": "wordnet",
+      "dictionary_name": "WordNet",
+      "modes": ["en"],
+      "redistribution": "unverified",
+      "license": "unverified",
+      "payload_included": false,
+      "note": "Verify the installed package and required notices before redistribution."
+    },
+    {
+      "id": "freedict-en-zh",
+      "dictionary_name": "English-中文 (Zhōngwén) FreeDict+WikDict dictionary",
+      "modes": ["en"],
+      "redistribution": "unverified",
+      "license": "unverified",
+      "payload_included": false,
+      "note": "The repository only records the exact local StarDict name."
+    },
+    {
+      "id": "xdict-en-han",
+      "dictionary_name": "XDICT英漢辭典",
+      "modes": ["en"],
+      "redistribution": "unverified",
+      "license": "unknown",
+      "payload_included": false,
+      "note": "User-installed only; do not bundle while the license is unresolved."
+    },
+    {
+      "id": "jmdict",
+      "dictionary_name": "org.edrdg.jmdict-jpn-eng",
+      "modes": ["ja"],
+      "redistribution": "unverified",
+      "license": "unverified",
+      "payload_included": false,
+      "note": "Verify the exact release and attribution requirements before redistribution."
+    },
+    {
+      "id": "reader-dict-ja",
+      "dictionary_name": "reader.dict JA",
+      "modes": ["ja"],
+      "redistribution": "unverified",
+      "license": "unknown",
+      "payload_included": false,
+      "note": "User-installed only; do not bundle while the license is unresolved."
+    },
+    {
+      "id": "words-hk",
+      "dictionary_name": "words.hk 粵語詞典",
+      "modes": ["yue"],
+      "redistribution": "do_not_redistribute",
+      "license": "all_rights_reserved",
+      "payload_included": false,
+      "note": "Configuration and local detection only. Never bundle the source CSV or converted StarDict data."
+    }
+  ]
+}

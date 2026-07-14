@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "roots": {
+    "home_bin": [
+      "dank-lookup",
+      "dank-lookup-language-packs",
+      "dank-lookup-selection"
+    ],
+    "app_lib": [
+      ".installed-by-dank-lookup",
+      "backends/mock.py",
+      "backends/mock.sh",
+      "backends/sdcv.py",
+      "backends/sdcv.sh",
+      "dank_lookup.py",
+      "dank_lookup_core.py",
+      "dank_lookup_runtime.py",
+      "dank_lookup_sdcv_stdin.py",
+      "language-packs/dank-lookup-language-packs",
+      "language-packs/default-config.json",
+      "language-packs/manifest.json"
+    ],
+    "quickshell": [
+      ".installed-by-dank-lookup",
+      "qml/Lookup.qml",
+      "qml/LookupApplication.qml",
+      "qml/LookupCard.qml",
+      "qml/LookupController.qml",
+      "qml/LookupTheme.qml",
+      "qml/MatugenThemeAdapter.qml",
+      "shell.qml"
+    ],
+    "systemd_user": [
+      "dank-lookup.service"
+    ],
+    "matugen": [
+      ".installed-by-dank-lookup",
+      "dark-template.json",
+      "light-template.json"
+    ],
+    "dms": [
+      ".installed-by-dank-lookup",
+      "DankLookup.qml",
+      "plugin.json",
+      "shared/Lookup.qml",
+      "shared/LookupApplication.qml",
+      "shared/LookupCard.qml",
+      "shared/LookupController.qml",
+      "shared/LookupTheme.qml",
+      "shared/MatugenThemeAdapter.qml"
+    ]
+  }
+}

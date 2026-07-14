@@ -1,95 +1,99 @@
-# Dictionary sources
+# Dictionary sources and admission policy
 
-This project does not distribute dictionary data. Users are responsible for installing dictionaries whose licenses permit their intended use.
+Dank Lookup supports the StarDict ecosystem through local `sdcv`. This
+repository ships routing configuration, source-name detection, a status tool,
+and conversion helpers only. It ships no `.ifo`, `.idx`, `.syn`, `.dict`,
+`.dict.dz`, source CSV, or converted dictionary payload.
 
-## Redistribution status
-
-| Status | Meaning |
-|--------|---------|
-| **redistributable** | Included in public package repos; license permits redistribution |
-| **user-installed only** | Available for download but license must be checked before repackaging |
-| **do not redistribute** | License explicitly restricts redistribution; local use only |
-
-## Currently supported dictionaries
-
-| Dictionary | Package / source | License | Redistribute? | Words |
-|------------|-----------------|---------|---------------|-------|
-| dictd_www.dict.org_gcide | `stardict-dictd_www.dict.org_gcide` (Arch) | GPL-2 | redistributable | 174,222 |
-| WordNet | `stardict-wordnet` (Arch, AUR) | WordNet License (permissive) | redistributable | 149,535 |
-| 萌典重編國語辭典 | Manual install | CC / public (educational) | redistributable | 161,194 |
-| XDICT英漢辭典 | Manual install | Unknown | user-installed only | 174,049 |
-| XDICT漢英辭典 | Manual install | Unknown | user-installed only | 158,137 |
-| reader.dict JA | Manual install | © reader.dict 2026 | user-installed only | 100,036 |
-| words.hk 粵語詞典 | Manual convert from CSV | ALL RIGHTS RESERVED | **do not redistribute** | 16,204 |
-| English-中文 FreeDict+WikDict | `stardict-freedict-eng-zho` | GPL | redistributable | 26,660 |
-| JMdict (org.edrdg.jmdict-jpn-eng) | Manual install from koaeH/JMdict-sdcv | CC-BY-SA 4.0 | redistributable | 412,413 |
-| CC-CEDICT 漢英辭典 | Manual convert from source | CC-BY-SA 4.0 | redistributable | 122,437 |
-| wikt-en-en (English Wiktionary) | Manual install from dictinfo.com | CC-BY-SA 3.0 + GFDL | redistributable | 1,306,573 |
-
-## Installation
-
-### System dictionaries (Arch Linux)
+The machine-readable policy is
+[`language-packs/manifest.json`](../language-packs/manifest.json). Run:
 
 ```bash
-sudo pacman -S sdcv stardict-dictd_www.dict.org_gcide stardict-freedict-eng-zho
+dank-lookup-language-packs status
+dank-lookup-language-packs status --json
 ```
 
-WordNet may be in AUR:
+to compare its exact StarDict names with `sdcv --list-dicts`. A configured mode
+is shown as unavailable when none of its dictionaries is installed; users do
+not need to author a routing schema to reach that state.
 
-```bash
-yay -S stardict-wordnet
+## Admission states
+
+| State | Meaning |
+|---|---|
+| `unverified` | The repository has not verified the exact payload, conversion chain, current terms, and required notices. Do not bundle or automate its download. |
+| `do_not_redistribute` | Known restriction: configuration/detection for an existing local copy only. Never bundle source or converted data. |
+| `redistributable` | Reserved for an artifact whose exact license and attribution chain have been admitted. No current manifest entry uses this state. |
+
+A familiar dictionary name, an old note, or an upstream project's general
+license is not enough to admit a particular converted StarDict artifact.
+
+## Configured names
+
+| Mode | Exact local StarDict names | Manifest state |
+|---|---|---|
+| `han` | `萌典重編國語辭典`, `CC-CEDICT 漢英辭典` | unverified |
+| `han` | `XDICT漢英辭典` | unknown license; unverified |
+| `en` | `wikt-en-en-2025-10-05`, `dictd_www.dict.org_gcide`, `WordNet`, `English-中文 (Zhōngwén) FreeDict+WikDict dictionary` | unverified by this repository |
+| `en` | `XDICT英漢辭典` | unknown license; unverified |
+| `ja` | `org.edrdg.jmdict-jpn-eng` | unverified exact artifact/attribution chain |
+| `ja` | `reader.dict JA` | unknown license; unverified |
+| `yue` | `words.hk 粵語詞典` | **do not redistribute** |
+
+The table describes compatibility, not permission. In particular, never
+publish words.hk source/converted data, XDICT, or reader.dict through this
+project. The prior documentation's confident redistribution claim for 萌典 is
+withdrawn pending verification of the exact artifact and terms.
+
+## Local installation
+
+Install only dictionaries whose terms you have checked for your use. StarDict
+normally searches these directories:
+
+```text
+$HOME/.local/share/stardict/dic
+/usr/share/stardict/dic
 ```
 
-### User-scope dictionaries
+After installing through your trusted package source or a verified manual
+process, confirm the exact display name:
 
 ```bash
-mkdir -p ~/.local/share/stardict/dic
-# Place .ifo, .idx*, .dict* files into ~/.local/share/stardict/dic/
 sdcv --list-dicts
+dank-lookup-language-packs status
 ```
 
-User-scope dictionaries take precedence over system ones.
+If the display name differs, copy the installed default config to your user
+config and adjust the `name` field; do not rename dictionary data blindly.
 
-## Adding new dictionaries
+## Definition format
 
-1. Download or convert a Stardict-compatible dictionary.
-2. Place the `.ifo`, `.idx` (or `.idx.gz`), and `.dict` (or `.dict.dz`) files in `~/.local/share/stardict/dic/`.
-3. Run `sdcv --list-dicts` to verify.
-4. Update `~/.config/dank-lookup/config.json` with the new source name.
+Definition cleanup follows metadata, never an angle-bracket content guess. A
+source may explicitly set `"definition_format": "html"` or
+`"definition_format": "plain"`. Without an override, Dank Lookup searches the
+configured StarDict data directories (and their direct `dic` child), matches
+the source `name` exactly to `.ifo` `bookname`, and reads
+`sametypesequence`. A single consistent `h` classification selects HTML
+cleanup; `m` selects plain cleanup.
 
-### CC-CEDICT (from source)
+Conflicting matches, mixed or unknown sequences, a missing `.ifo`, or a missing
+`sametypesequence` all use conservative plain text. That preserves prose such
+as `vector<T>`. If `sdcv` has already flattened per-entry field markers and the
+`.ifo` omits `sametypesequence`, the original field format cannot be recovered;
+the application deliberately does not guess HTML from the definition body.
 
-```bash
-# Download latest CC-CEDICT source (tab-separated, 125k entries)
-curl -sL 'https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz' \
-  | gzip -d > /tmp/cedict_ts_utf8.txt
+## Conversion and attribution
 
-# Convert with pyglossary (or use included conversion script)
-pipx run pyglossary /tmp/cedict_ts_utf8.txt ~/.local/share/stardict/dic/cc-cedict/
-```
+`tests/convert_wordshk_csv.py` remains a local conversion helper. Its presence
+does not grant permission to obtain, convert, or redistribute source data.
 
-### JMdict (koaeH/JMdict-sdcv)
+For any newly admitted source, record all of the following before adding an
+installer or redistribution claim:
 
-```bash
-# Download from GitHub release
-curl -sL 'https://github.com/koaeH/JMdict-sdcv/releases/download/20230101/org.edrdg.jmdict-jpn-eng.tar.gz' \
-  | tar xz -C ~/.local/share/stardict/dic/
-```
-
-### English Wiktionary (dictinfo.com)
-
-```bash
-# Download English-English Wiktionary (1.3M entries, 45 MB)
-curl -sL 'https://www.dictinfo.com/stardict/wikt-en-en-2025-10-05.7z' \
-  -o /tmp/wikt-en-en.7z
-7z x /tmp/wikt-en-en.7z -o~/.local/share/stardict/dic/wikt-en-en/
-```
-
-## Source URL references
-
-- GCIDE: https://gcide.gnu.org.ua/
-- WordNet: https://wordnet.princeton.edu/
-- FreeDict: https://freedict.org/
-- JMdict: https://github.com/koaeH/JMdict-sdcv (CC-BY-SA 4.0, 412k entries)
-- CC-CEDICT: https://cc-cedict.org/wiki/ or https://www.mdbg.net/chinese/dictionary?page=cedict (CC-BY-SA 4.0)
-- English Wiktionary (dictinfo.com): https://www.dictinfo.com/
+1. exact source and release identifier;
+2. exact payload hashes;
+3. license text covering that payload and conversion;
+4. required attribution/share-alike/notices;
+5. converter version and reproducible command;
+6. whether modified/converted redistribution is allowed;
+7. a negative check proving no dictionary payload entered this repository.

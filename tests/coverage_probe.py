@@ -9,11 +9,11 @@ Usage:
     python3 tests/coverage_probe.py --suite han   # single suite
     python3 tests/coverage_probe.py --json        # machine-readable output
 """
-import json, subprocess, os, sys, pathlib, argparse
+import json, subprocess, os, sys, pathlib, argparse, tempfile
 from collections import defaultdict
 
 BACKEND = pathlib.Path(__file__).resolve().parent.parent / "lib/backends/sdcv.sh"
-TMP = pathlib.Path("/tmp/dank-lookup")
+TMP = None
 
 # ── Test suites ──────────────────────────────────────────────
 
@@ -134,12 +134,14 @@ REGRESSION_SUITES = {k for k, v in SUITES.items() if v.get("regression")}
 # ── Runner ───────────────────────────────────────────────────
 
 def query_backend(term):
+    if TMP is None:
+        raise RuntimeError("probe output directory is not initialised")
     out = TMP / ("probe-%d.json" % abs(hash(term)))
     env = os.environ.copy()
     env["DANK_LOOKUP_OUTPUT"] = str(out)
     subprocess.run(
-        ["bash", str(BACKEND), term],
-        capture_output=True, env=env, timeout=10,
+        ["bash", str(BACKEND), "--stdin"],
+        input=term.encode("utf-8"), capture_output=True, env=env, timeout=10,
     )
     try:
         with open(out) as f:
@@ -210,6 +212,7 @@ def print_summary(all_results):
 
 
 def main():
+    global TMP
     parser = argparse.ArgumentParser(description="Dictionary coverage probe")
     parser.add_argument("--suite", nargs="*", help="Suite names to run (default: all)")
     parser.add_argument("--json", action="store_true", help="JSON output")
@@ -221,8 +224,6 @@ def main():
             print("%-20s %s (%d terms)" % (name, s["label"], len(s["terms"])))
         return
 
-    TMP.mkdir(parents=True, exist_ok=True)
-
     names = args.suite if args.suite else list(SUITES.keys())
     unknown = [n for n in names if n not in SUITES]
     if unknown:
@@ -230,17 +231,19 @@ def main():
         print("Available: %s" % ", ".join(SUITES.keys()), file=sys.stderr)
         sys.exit(1)
 
-    all_results = []
-    for name in names:
-        s = run_suite(name, SUITES[name])
-        all_results.append(s)
-        if not args.json:
-            print_suite(s)
+    with tempfile.TemporaryDirectory(prefix="dank-lookup-probe-") as temporary:
+        TMP = pathlib.Path(temporary)
+        all_results = []
+        for name in names:
+            s = run_suite(name, SUITES[name])
+            all_results.append(s)
+            if not args.json:
+                print_suite(s)
 
-    if args.json:
-        json.dump(all_results, sys.stdout, indent=2, ensure_ascii=False)
-    else:
-        print_summary(all_results)
+        if args.json:
+            json.dump(all_results, sys.stdout, indent=2, ensure_ascii=False)
+        else:
+            print_summary(all_results)
 
 
 if __name__ == "__main__":

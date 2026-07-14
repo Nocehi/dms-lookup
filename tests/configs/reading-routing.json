@@ -1,0 +1,41 @@
+{
+  "version": 2,
+  "modes": {
+    "han": {
+      "label": "漢語",
+      "enabled": true,
+      "default_for": ["han"],
+      "sources": [
+        {"name": "萌典重編國語辭典", "when": "han", "exact_only": true, "allow_related": false}
+      ]
+    },
+    "en-en": {
+      "label": "英英",
+      "enabled": true,
+      "default_for": ["latin"],
+      "sources": [
+        {"name": "dictd_www.dict.org_gcide", "data_dir": "/usr/share/stardict/dic", "when": "latin", "exact_only": true, "allow_related": true},
+        {"name": "WordNet", "data_dir": "/usr/share/stardict/dic", "when": "latin", "exact_only": true, "allow_related": true}
+      ]
+    },
+    "ja": {
+      "label": "日本語",
+      "enabled": true,
+      "default_for": ["kana", "han"],
+      "priority_boost": ["kana"],
+      "sources": [
+        {"name": "reader.dict JA", "when": ["kana", "han"], "exact_only": true, "allow_related": false}
+      ]
+    },
+    "yue": {
+      "label": "粵語",
+      "enabled": true,
+      "default_for": ["han"],
+      "priority_boost": ["cantonese_marker"],
+      "sources": [
+        {"name": "words.hk 粵語詞典", "when": "han", "exact_only": true, "allow_related": false}
+      ]
+    }
+  },
+  "fallback": {"mock": false, "unfiltered": false}
+}

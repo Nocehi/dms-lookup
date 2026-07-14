@@ -1,103 +1,149 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-out_dir="/tmp/dank-lookup"
-out_file="$out_dir/latest.json"
-tmp_file="$out_dir/latest.json.tmp"
-backend_script="$HOME/.local/lib/dank-lookup/backends/sdcv.sh"
-mkdir -p "$out_dir"
+# This script reads the selection only when explicitly invoked. It never runs a
+# clipboard watcher and never interpolates selected text into shell code.
+umask 077
 
-source_name="primary"
-query="$(timeout 0.25 wl-paste --primary --no-newline 2>/dev/null || true)"
-
-if [ -z "${query//[[:space:]]/}" ]; then
-  source_name="clipboard"
-  query="$(timeout 0.25 wl-paste --no-newline 2>/dev/null || true)"
-fi
-
-query="$(printf '%s' "$query" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s '[:space:]' ' ')"
-
-if [ -z "${query//[[:space:]]/}" ]; then
-  export SOURCE="$source_name"
-  python3 -c '
-import json, os, sys
-result = {
-  "query": "",
-  "source": os.environ.get("SOURCE", ""),
-  "timestamp": "",
-  "truncated": False,
-  "backend": "mock",
-  "results": [],
-  "error": "No selection or clipboard content"
+timeout_ms() {
+    local name="$1"
+    local value="${!name:-250}"
+    if [[ ! "$value" =~ ^[0-9]+$ ]] \
+            || (( 10#$value < 1 || 10#$value > 5000 )); then
+        printf '%s must be an integer from 1 to 5000 ms\n' "$name" >&2
+        exit 2
+    fi
+    printf '%d' "$((10#$value))"
 }
-json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
-' > "$tmp_file"
-mv "$tmp_file" "$out_file"
-cat "$out_file"
-  exit 0
-fi
 
-truncated=false
-if [ ${#query} -gt 500 ]; then
-  query="${query:0:500}"
-  truncated=true
-fi
-
-"$backend_script" "$query"
-
-export QUERY="$query"
-export SOURCE="$source_name"
-export TIMESTAMP="$(date --iso-8601=seconds)"
-export TRUNCATED="$truncated"
-
-if [ -f "$out_dir/backend_result.json" ]; then
-  python3 -c '
-import json, sys, os
-
-with open(sys.argv[1]) as f:
-    br = json.load(f)
-
-result = {
-  "query": os.environ["QUERY"],
-  "source": os.environ["SOURCE"],
-  "timestamp": os.environ["TIMESTAMP"],
-  "truncated": os.environ.get("TRUNCATED", "false") == "true",
-  "backend": br.get("backend", "mock"),
-  "default_mode": br.get("default_mode"),
-  "available_modes": br.get("available_modes"),
-  "results_by_mode": br.get("results_by_mode"),
-  "related_by_mode": br.get("related_by_mode"),
-  "mode_preferences": br.get("mode_preferences"),
-  "config": br.get("config"),
-  "segmented": br.get("segmented"),
-  "tokens": br.get("tokens"),
-  "results_by_token": br.get("results_by_token"),
-  "results": [
-    {
-      "title": br.get("title", os.environ["QUERY"]),
-      "subtitle": br.get("subtitle", ""),
-      "body": br.get("body", "")
-    }
-  ],
-  "error": None
+capture_one() {
+    local kind="$1"
+    local milliseconds="$2"
+    local seconds
+    local output
+    local code
+    printf -v seconds '%d.%03d' "$((milliseconds / 1000))" "$((milliseconds % 1000))"
+    CAPTURE_VALUE=""
+    if ! command -v wl-paste >/dev/null 2>&1; then
+        CAPTURE_STATUS="unavailable"
+        return
+    fi
+    if [[ "$kind" == "primary" ]]; then
+        if output="$(timeout "$seconds" wl-paste --primary --no-newline 2>/dev/null)"; then
+            code=0
+        else
+            code=$?
+        fi
+    else
+        if output="$(timeout "$seconds" wl-paste --no-newline 2>/dev/null)"; then
+            code=0
+        else
+            code=$?
+        fi
+    fi
+    if (( code == 0 )); then
+        CAPTURE_VALUE="$output"
+        if [[ -n "${output//[[:space:]]/}" ]]; then
+            CAPTURE_STATUS="success_nonempty"
+        else
+            CAPTURE_STATUS="success_empty"
+        fi
+    elif (( code == 124 || code == 137 )); then
+        CAPTURE_STATUS="timeout"
+    else
+        CAPTURE_STATUS="command_error"
+    fi
 }
-json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
-' "$out_dir/backend_result.json" > "$tmp_file"
-else
-  python3 -c '
-import json, os
-result = {
-  "query": os.environ["QUERY"],
-  "source": os.environ["SOURCE"],
-  "timestamp": os.environ["TIMESTAMP"],
-  "truncated": os.environ.get("TRUNCATED", "false") == "true",
-  "backend": "mock",
-  "results": [],
-  "error": "Backend adapter did not produce a result"
+
+capture_selection() {
+    local primary_timeout
+    local clipboard_timeout
+    local primary_status
+    local clipboard_status="not_attempted"
+    local selected_source="none"
+    local final_status
+    local query=""
+    primary_timeout="$(timeout_ms DANK_LOOKUP_PRIMARY_TIMEOUT_MS)"
+    clipboard_timeout="$(timeout_ms DANK_LOOKUP_CLIPBOARD_TIMEOUT_MS)"
+
+    capture_one "primary" "$primary_timeout"
+    primary_status="$CAPTURE_STATUS"
+    if [[ "$primary_status" == "success_nonempty" ]]; then
+        selected_source="primary"
+        final_status="$primary_status"
+        query="$CAPTURE_VALUE"
+    else
+        capture_one "clipboard" "$clipboard_timeout"
+        clipboard_status="$CAPTURE_STATUS"
+        final_status="$clipboard_status"
+        if [[ "$clipboard_status" == "success_nonempty" ]]; then
+            selected_source="clipboard"
+            query="$CAPTURE_VALUE"
+        fi
+    fi
+
+    # Collapse layout whitespace only; dictionary content is untouched downstream.
+    query="$(printf '%s' "$query" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s '[:space:]' ' ')"
+    if (( ${#query} > 4096 )); then
+        query="${query:0:4096}"
+    fi
+    printf '%s\n%s\n%s\n%s\n%s\n%s' \
+        'capture-v1' "$final_status" "$selected_source" \
+        "$primary_status" "$clipboard_status" "$query"
 }
-json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
-' > "$tmp_file"
+
+if [[ "${1:-}" == "--capture" ]]; then
+    capture_selection
+    exit 0
 fi
 
-mv "$tmp_file" "$out_file"
-cat "$out_file"
+frontend="${DANK_LOOKUP_FRONTEND:-standalone}"
+source_name="${1:-selection}"
+if [[ "$source_name" == "--frontend" ]]; then
+    frontend="${2:-}"
+    source_name="${3:-selection}"
+fi
+
+case "$frontend" in
+    standalone|dms) ;;
+    *)
+        printf 'unsupported frontend: %s\n' "$frontend" >&2
+        exit 2
+        ;;
+esac
+
+ipc_call() {
+    if [[ "$frontend" == "dms" ]]; then
+        dms ipc dank-lookup-dms "$@"
+    else
+        quickshell -c dank-lookup ipc call dank-lookup "$@"
+    fi
+}
+
+extract_id() {
+    # Quickshell versions differ in whether IPC string returns are quoted or
+    # prefixed with "Ret:". Accept only a conservative identifier afterwards.
+    sed -n 's/^.*Ret:[[:space:]]*//;s/^"//;s/"$//;${p;}' \
+        | tr -cd 'A-Za-z0-9_.-'
+}
+
+prepare() {
+    ipc_call prepare "$source_name" 2>/dev/null | extract_id
+}
+
+request_id="$(prepare || true)"
+if [[ -z "$request_id" && "$frontend" == "standalone" ]]; then
+    quickshell -c dank-lookup --daemonize >/dev/null 2>&1 || true
+    for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+        request_id="$(prepare || true)"
+        [[ -n "$request_id" ]] && break
+        sleep 0.05
+    done
+fi
+
+if [[ -z "$request_id" ]]; then
+    printf 'Dank Lookup frontend IPC is unavailable\n' >&2
+    exit 1
+fi
+
+ipc_call capturePrepared "$request_id" "$source_name" >/dev/null

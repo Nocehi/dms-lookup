@@ -1,13 +1,29 @@
 #!/usr/bin/env python3
-import json, subprocess, sys, pathlib, os
+"""Run one explicitly configured backend fixture set from this checkout."""
 
-ROOT = pathlib.Path.home() / ".local/lib/dank-lookup"
-BACKEND = ROOT / "backends/sdcv.sh"
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+DEFAULT_BACKEND = ROOT / "lib/backends/sdcv.sh"
 DEFAULT_FIXTURES = ROOT / "tests/fixtures"
-TMP = pathlib.Path("/tmp/dank-lookup")
+CONFIG_BY_SET = {
+    "fixtures": ROOT / "tests/configs/legacy-full.json",
+    "fixtures-ci-minimal": ROOT / "tests/configs/ci-minimal.json",
+    "fixtures-reading-routing": ROOT / "tests/configs/reading-routing.json",
+    "fixtures-ja-yue": ROOT / "tests/configs/reading-routing.json",
+    "fixtures-risk-hardening": ROOT / "tests/configs/reading-routing.json",
+    "fixtures-segmentation": ROOT / "tests/configs/reading-routing.json",
+}
 
-passed = 0
-failed = 0
 
 def get_at(data, dotted_key):
     parts = dotted_key.split(".", 1)
@@ -16,148 +32,176 @@ def get_at(data, dotted_key):
     sub = data.get(parts[0], {}) if isinstance(data, dict) else {}
     return get_at(sub, parts[1]) if isinstance(sub, dict) else None
 
+
 def check_contains(label, actual, needles, errors):
     text = actual if isinstance(actual, str) else ""
-    missing = [n for n in needles if n not in text]
+    missing = [needle for needle in needles if needle not in text]
     if missing:
         errors.append(f"{label}: missing {missing}")
 
+
 def check_contains_any(label, actual, needles, errors):
     text = actual if isinstance(actual, str) else ""
-    if not any(n in text for n in needles):
+    if not any(needle in text for needle in needles):
         errors.append(f"{label}: none of {needles} found")
+
 
 def check_not_contains(label, actual, needles, errors):
     text = actual if isinstance(actual, str) else ""
-    found = [n for n in needles if n in text]
+    found = [needle for needle in needles if needle in text]
     if found:
         errors.append(f"{label}: contains {found}")
 
+
 def check_expect(data, expect, prefix="errors"):
     errors = []
-    for key, val in expect.items():
+    for key, value in expect.items():
         label = f"{prefix}.{key}"
-
         if key == "backend":
-            if data.get("backend") != val:
-                errors.append(f"{label}: expected {val!r}, got {data.get('backend')!r}")
-
+            if data.get("backend") != value:
+                errors.append(f"{label}: expected {value!r}, got {data.get('backend')!r}")
         elif key == "default_mode":
-            if data.get("default_mode") != val:
-                errors.append(f"{label}: expected {val!r}, got {data.get('default_mode')!r}")
-
+            if data.get("default_mode") != value:
+                errors.append(f"{label}: expected {value!r}, got {data.get('default_mode')!r}")
         elif key == "default_mode_not":
-            if data.get("default_mode") == val:
-                errors.append(f"{label}: should not be {val!r}")
-
+            if data.get("default_mode") == value:
+                errors.append(f"{label}: should not be {value!r}")
         elif key == "available_modes_contains":
             actual = data.get("available_modes", [])
-            if not isinstance(actual, list):
-                errors.append(f"{label}: not a list ({type(actual).__name__})")
-            else:
-                missing = [m for m in val if m not in actual]
-                if missing:
-                    errors.append(f"{label}: missing modes {missing} (have {actual})")
-
+            missing = [mode for mode in value if mode not in actual] if isinstance(actual, list) else value
+            if missing:
+                errors.append(f"{label}: missing modes {missing} (have {actual})")
         elif key == "available_modes_not_contains":
             actual = data.get("available_modes", [])
-            if isinstance(actual, list):
-                found = [m for m in val if m in actual]
-                if found:
-                    errors.append(f"{label}: should not contain {found}")
-
+            found = [mode for mode in value if mode in actual] if isinstance(actual, list) else []
+            if found:
+                errors.append(f"{label}: should not contain {found}")
         elif key == "tokens_contains":
             actual = data.get("tokens", [])
-            if not isinstance(actual, list):
-                errors.append(f"{label}: not a list ({type(actual).__name__})")
-            else:
-                missing = [t for t in val if t not in actual]
-                if missing:
-                    errors.append(f"{label}: missing tokens {missing} (have {actual})")
-
+            missing = [token for token in value if token not in actual] if isinstance(actual, list) else value
+            if missing:
+                errors.append(f"{label}: missing tokens {missing} (have {actual})")
         elif key == "tokens_length_gte":
             actual = data.get("tokens", [])
-            if not isinstance(actual, list) or len(actual) < val:
-                errors.append(f"{label}: expected >= {val} tokens, got {len(actual) if isinstance(actual, list) else 'non-list'}")
-
-        elif val is None:
+            if not isinstance(actual, list) or len(actual) < value:
+                errors.append(f"{label}: expected >= {value} tokens")
+        elif key == "token_results_mode_contains":
+            token_results = data.get("results_by_token", {})
+            modes = {
+                mode
+                for token_result in token_results.values()
+                if isinstance(token_result, dict)
+                for mode in token_result.get("available_modes", [])
+            }
+            missing = [mode for mode in value if mode not in modes]
+            if missing:
+                errors.append(f"{label}: missing token-result modes {missing} (have {sorted(modes)})")
+        elif value is None:
             if get_at(data, key) is not None:
                 errors.append(f"{label}: expected null, got {get_at(data, key)!r}")
-
-        elif isinstance(val, dict):
+        elif isinstance(value, dict):
             sub = get_at(data, key) or {}
             if not isinstance(sub, dict):
                 errors.append(f"{label}: not a dict ({type(sub).__name__})")
                 continue
-            for check_key, check_val in val.items():
-                clabel = f"{label}.{check_key}"
+            for check_key, check_value in value.items():
+                check_label = f"{label}.{check_key}"
                 if check_key == "subtitle_contains":
-                    check_contains(clabel, sub.get("subtitle", ""), check_val, errors)
+                    check_contains(check_label, sub.get("subtitle", ""), check_value, errors)
                 elif check_key == "body_contains":
-                    check_contains(clabel, sub.get("body", ""), check_val, errors)
+                    check_contains(check_label, sub.get("body", ""), check_value, errors)
                 elif check_key == "body_contains_any":
-                    check_contains_any(clabel, sub.get("body", ""), check_val, errors)
+                    check_contains_any(check_label, sub.get("body", ""), check_value, errors)
                 elif check_key == "body_not_contains":
-                    check_not_contains(clabel, sub.get("body", ""), check_val, errors)
-
+                    check_not_contains(check_label, sub.get("body", ""), check_value, errors)
         else:
             actual = get_at(data, key)
-            if actual != val:
-                errors.append(f"{label}: expected {val!r}, got {actual!r}")
-
+            if actual != value:
+                errors.append(f"{label}: expected {value!r}, got {actual!r}")
     return errors
 
-def run_fixture(path):
-    global passed, failed
+
+def backend_argv(backend: pathlib.Path) -> list[str]:
+    if backend.suffix == ".sh":
+        return ["bash", str(backend), "--stdin"]
+    if os.access(backend, os.X_OK):
+        return [str(backend), "--stdin"]
+    return [sys.executable, str(backend), "--stdin"]
+
+
+def run_fixture(path, backend, config, output_dir, timeout):
     fixture = json.loads(path.read_text(encoding="utf-8"))
     query = fixture["query"]
-    expect = fixture["expect"]
-
-    out_path = TMP / f"fixture-{path.stem}.json"
+    output = output_dir / f"fixture-{path.stem}.json"
     env = os.environ.copy()
-    env["DANK_LOOKUP_OUTPUT"] = str(out_path)
-
-    result = subprocess.run([str(BACKEND), query], capture_output=True, text=True, timeout=10, env=env)
+    env["DANK_LOOKUP_OUTPUT"] = str(output)
+    env["DANK_LOOKUP_CONFIG"] = str(config)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    result = subprocess.run(
+        backend_argv(backend),
+        input=query,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
     if result.returncode != 0:
-        print(f"  FAIL  {query}: backend exit {result.returncode}")
-        failed += 1
-        return
-
+        return [f"backend exit {result.returncode}: {result.stderr.strip()}"]
     try:
-        data = json.loads(out_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"  FAIL  {query}: JSON parse error: {e}")
-        failed += 1
-        return
+        data = json.loads(output.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [f"JSON parse error: {exc}"]
+    return check_expect(data, fixture["expect"], prefix=query)
 
-    errors = check_expect(data, expect, prefix=query)
-    if errors:
-        print(f"  FAIL  {query}")
-        for e in errors:
-            print(f"         {e}")
-        failed += 1
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("fixtures", nargs="?", type=pathlib.Path, default=DEFAULT_FIXTURES)
+    parser.add_argument("--backend", type=pathlib.Path, default=pathlib.Path(os.environ.get("DANK_LOOKUP_BACKEND", DEFAULT_BACKEND)))
+    parser.add_argument("--config", type=pathlib.Path)
+    parser.add_argument("--timeout", type=float, default=10.0)
+    args = parser.parse_args(argv)
+
+    fixture_dir = args.fixtures.resolve()
+    backend = args.backend.resolve()
+    if args.config is not None:
+        config = args.config
+    elif os.environ.get("DANK_LOOKUP_CONFIG"):
+        config = pathlib.Path(os.environ["DANK_LOOKUP_CONFIG"])
     else:
-        print(f"  PASS  {query}")
-        passed += 1
-
-def main():
-    global passed, failed
-    config_label = os.environ.get("DANK_LOOKUP_CONFIG", "(default)")
-    print(f"dankLookup backend fixtures")
-    print(f"config: {config_label}")
-
-    fixture_dir = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_FIXTURES
+        config = CONFIG_BY_SET.get(fixture_dir.name)
+    if config is None:
+        parser.error(f"no exact config mapped for fixture set {fixture_dir.name}; pass --config")
+    config = pathlib.Path(config).resolve()
+    if not backend.is_file():
+        parser.error(f"backend not found: {backend}")
+    if not config.is_file():
+        parser.error(f"config not found: {config}")
     fixture_files = sorted(fixture_dir.glob("*.json"))
     if not fixture_files:
-        print(f"  ERROR: no fixture files found in {fixture_dir}")
-        sys.exit(1)
-    for f in fixture_files:
-        run_fixture(f)
-    total = passed + failed
-    print(f"\n{'-'*40}")
-    print(f"  {passed}/{total} passed")
-    if failed:
-        sys.exit(1)
+        parser.error(f"no fixture files found in {fixture_dir}")
+
+    print("Dank Lookup backend fixture set")
+    print(f"fixtures: {fixture_dir}")
+    print(f"backend:  {backend}")
+    print(f"config:   {config}")
+    passed = 0
+    failed = 0
+    with tempfile.TemporaryDirectory(prefix="dank-lookup-fixtures-") as temporary:
+        output_dir = pathlib.Path(temporary)
+        for fixture in fixture_files:
+            errors = run_fixture(fixture, backend, config, output_dir, args.timeout)
+            if errors:
+                print(f"  FAIL  {fixture.name}")
+                for error in errors:
+                    print(f"         {error}")
+                failed += 1
+            else:
+                print(f"  PASS  {fixture.name}")
+                passed += 1
+    print(f"result: {passed}/{passed + failed} passed for {fixture_dir.name}")
+    return 1 if failed else 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

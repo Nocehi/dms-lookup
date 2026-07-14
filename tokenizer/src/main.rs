@@ -2,20 +2,24 @@ use std::io::{self, Read};
 
 fn tokenize_zh(text: &str) -> Vec<String> {
     let jieba = jieba_rs::Jieba::new();
-    jieba.cut(text, true).into_iter().map(|s| s.to_string()).collect()
+    jieba
+        .cut(text, true)
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn tokenize_ja(text: &str) -> Vec<String> {
     let dictionary = lindera::dictionary::load_dictionary("embedded://ipadic")
         .expect("failed to load ipadic dictionary");
-    let segmenter = lindera::segmenter::Segmenter::new(
-        lindera::mode::Mode::Normal,
-        dictionary,
-        None,
-    );
+    let segmenter =
+        lindera::segmenter::Segmenter::new(lindera::mode::Mode::Normal, dictionary, None);
     let tokenizer = lindera::tokenizer::Tokenizer::new(segmenter);
     let tokens = tokenizer.tokenize(text).expect("tokenization failed");
-    tokens.iter().map(|t| t.surface.as_ref().to_string()).collect()
+    tokens
+        .iter()
+        .map(|t| t.surface.as_ref().to_string())
+        .collect()
 }
 
 fn main() {
@@ -23,7 +27,7 @@ fn main() {
 
     let mut lang = None;
     let mut json_output = false;
-    let mut input_text = None;
+    let mut stdin_input = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -35,8 +39,12 @@ fn main() {
             "--json" => {
                 json_output = true;
             }
-            other if !other.starts_with('-') => {
-                input_text = Some(other.to_string());
+            "--stdin" => {
+                stdin_input = true;
+            }
+            _other if !_other.starts_with('-') => {
+                eprintln!("positional text is not supported; write the query to stdin");
+                std::process::exit(1);
             }
             _ => {
                 eprintln!("unknown option: {}", args[i]);
@@ -47,18 +55,19 @@ fn main() {
     }
 
     let lang = lang.unwrap_or_else(|| {
-        eprintln!("usage: dank-lookup-tokenize --lang zh|ja [--json] [TEXT]");
+        eprintln!("usage: dank-lookup-tokenize --lang zh|ja [--json] --stdin");
         std::process::exit(1);
     });
 
-    let text = match input_text {
-        Some(t) => t,
-        None => {
-            let mut buf = String::new();
-            io::stdin().read_to_string(&mut buf).expect("failed to read stdin");
-            buf
-        }
-    };
+    if !stdin_input {
+        eprintln!("--stdin is required; positional text is not supported");
+        std::process::exit(1);
+    }
+
+    let mut text = String::new();
+    io::stdin()
+        .read_to_string(&mut text)
+        .expect("failed to read stdin");
     let text = text.trim();
 
     if text.is_empty() {
@@ -84,5 +93,26 @@ fn main() {
         for token in &tokens {
             println!("{}", token);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tokenize_ja, tokenize_zh};
+
+    #[test]
+    fn chinese_tokens_preserve_the_input_text() {
+        let input = "我來到北京清華大學";
+        let tokens = tokenize_zh(input);
+        assert!(!tokens.is_empty());
+        assert_eq!(tokens.concat(), input);
+    }
+
+    #[test]
+    fn japanese_tokens_preserve_the_input_text() {
+        let input = "日本語の勉強";
+        let tokens = tokenize_ja(input);
+        assert!(!tokens.is_empty());
+        assert_eq!(tokens.concat(), input);
     }
 }

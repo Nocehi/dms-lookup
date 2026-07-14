@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — standalone-first 0.8.0
+
+- Add a standalone Quickshell frontend with no `qs.*`/DMS imports; retain DMS
+  only as an optional 1.4.6+ `daemon` theme/IPC wrapper.
+- Replace synchronous `/tmp` file polling with two-stage Quickshell IPC:
+  loading frame first, then explicit selection capture and asynchronous lookup.
+- Add request UUID/sequence ordering, stale-completion suppression, popup-open
+  updates, structured errors, and remove the QML two-second debounce.
+- Fix Copy/Open full to use the active exact/related/token result. Previews have
+  explicit truncation; bounded complete content is carried once, while an
+  oversized body uses an opaque ref and is re-fetched only after Open full.
+- Consume ordered segmentation results in the UI, including duplicate token
+  text, with predictable mode/related/scroll reset.
+- Extract the Python lookup core from the shell heredoc; retain sdcv/StarDict as
+  the baseline backend and add deterministic core/runtime/CLI tests.
+- Make script-feature routing character-order independent. Kana/Cantonese
+  markers boost `ja`/`yue` defaults without hiding other exact modes.
+- Ship fresh `han/en/ja/yue` routing, dictionary availability detection, and a
+  no-download language-pack manifest/status tool. No dictionary payload is
+  bundled; unresolved licenses remain unverified/non-redistributable.
+- Move explicit runtime artifacts to private XDG runtime storage with 0700/0600,
+  `umask 077`, atomic writes, cleanup, and a verified per-user `/tmp` fallback.
+  Normal lookups retain no query/result file; explicit Open files have automatic
+  short-TTL cleanup.
+- Add built-in light/dark palettes, generic matugen JSON templates/safe reload,
+  and a minimal DMS theme adapter.
+- Add guarded standalone-first installer/uninstaller, optional DMS install,
+  user service, fresh-HOME release gates, backend strategy benchmark JSON, and
+  isolated offscreen QML behavior/latency harnesses.
+
+Historical entries below record what was claimed or observed in the local
+development environment at that time. Counts such as `26/26` or `93%` are not
+current portable release guarantees; current suites require their exact config,
+dictionaries, and reported environment.
+
 ## v0.7.1 (2026-05-12)
 
 - Remove 700ms cooldown from `bin/dank-lookup-selection`; niri `repeat=false` is the sole anti-rapid-fire mechanism

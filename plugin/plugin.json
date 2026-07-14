@@ -1,13 +1,33 @@
 {
+  "$schema": "https://danklinux.com/schemas/plugin.json",
   "id": "dankLookup",
-  "name": "Dank Lookup",
-  "description": "Local selection dictionary lookup popup for DMS",
-  "version": "0.7.1",
+  "name": "Dank Lookup Compatibility",
+  "description": "Optional DMS theme adapter and IPC wrapper for the standalone local dictionary popup",
+  "version": "0.8.0",
   "author": "Nocehi",
-  "type": "launcher",
+  "type": "daemon",
   "capabilities": ["lookup", "selection", "dictionary"],
   "component": "./DankLookup.qml",
   "icon": "menu_book",
-  "requires_dms": ">=1.2.0",
-  "permissions": ["process"]
+  "requires_dms": ">=1.4.6",
+  "requires": ["dank-lookup", "wl-copy", "xdg-open"],
+  "permissions": ["process"],
+  "processes": [
+    {
+      "command": "dank-lookup lookup",
+      "purpose": "Run an explicit local dictionary request"
+    },
+    {
+      "command": "dank-lookup open-text",
+      "purpose": "Open an inline active full entry after an explicit user action"
+    },
+    {
+      "command": "dank-lookup open-ref",
+      "purpose": "Re-fetch and open a private full-entry file after an explicit user action"
+    },
+    {
+      "command": "wl-copy",
+      "purpose": "Copy the active displayed entry after an explicit user action"
+    }
+  ]
 }

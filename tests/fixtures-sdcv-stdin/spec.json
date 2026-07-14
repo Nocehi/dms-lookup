@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "dictionaries": [
+    {
+      "bookname": "DANK_STDIN_A",
+      "sametypesequence": "m",
+      "entries": [
+        {"word": "word", "definition": "fixture-a exact english"},
+        {"word": "world", "definition": "fixture-a related english"},
+        {"word": "漢字", "definition": "fixture-a han unicode"},
+        {"word": "かな", "definition": "fixture-a ja unicode"},
+        {"word": "粵語", "definition": "fixture-a yue unicode"}
+      ]
+    },
+    {
+      "bookname": "DANK_STDIN_B",
+      "sametypesequence": "m",
+      "entries": [
+        {"word": "word", "definition": "fixture-b exact english"},
+        {"word": "漢字", "definition": "fixture-b han unicode"}
+      ]
+    }
+  ]
+}

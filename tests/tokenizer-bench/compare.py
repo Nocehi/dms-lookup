@@ -51,7 +51,8 @@ def run_tokenizer(tokenizer_path, lang, text):
     """Run the Rust tokenizer binary and return token list."""
     try:
         result = subprocess.run(
-            [str(tokenizer_path), "--lang", lang, "--json", text],
+            [str(tokenizer_path), "--lang", lang, "--json", "--stdin"],
+            input=text,
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:

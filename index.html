@@ -3,11 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>dms-lookup — Wayland 上的離線選詞辭典</title>
-<meta name="description" content="dms-lookup: Wayland 上的離線選詞辭典。選字 → Mod+Alt+D → Material 3 卡片彈出。無 daemon、無剪貼簿監聽。" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;500;600;700&family=Noto+Sans+TC:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<title>Dank Lookup — Wayland 上的離線選詞辭典</title>
+<meta name="description" content="Dank Lookup: standalone-first Wayland 離線選詞辭典。常駐介面只接受明確 IPC，不監聽剪貼簿；DMS 為可選相容層。" />
 <style>
   :root {
     --primary:           #006972;
@@ -175,7 +172,7 @@
     <header class="topbar">
       <div class="wordmark">
         <span class="dot" aria-hidden="true"></span>
-        <span class="name">dms-lookup</span>
+        <span class="name">dank-lookup</span>
       </div>
       <nav>
         <a href="#install">安裝</a>
@@ -185,14 +182,14 @@
     </header>
 
     <section class="hero">
-      <div class="eyebrow">v0.7.1 · Linux / Wayland</div>
+      <div class="eyebrow">v0.8.0 · standalone-first · Linux / Wayland</div>
       <h1 class="title">Wayland 上的<br />離線選詞辭典。</h1>
       <p class="lede">
         選任何視窗裡的文字，按下 <span class="mono" style="color:var(--on-surface)">Mod+Alt+D</span>，
-        一張 Material Design 3 卡片居中浮現，比字典薄，比瀏覽器快，按鍵，如你所見。
+        一張 Material Design 3 卡片居中浮現；本地查詞結果在同一張可捲動卡片更新。
       </p>
       <div class="hero-meta">
-        <span>無 daemon</span>
+        <span>常駐 UI 不讀剪貼簿</span>
         <span>無剪貼簿監聽</span>
         <span>無網路請求</span>
         <span>漢 · 粵 · 日 · 英</span>
@@ -212,10 +209,12 @@
     <section id="install" class="section">
       <div class="section-label">$ &nbsp;install</div>
       <div class="install-wrap">
-        <p>需要 niri + Dank Material Shell + <span class="mono">sdcv</span>。字典需另行安裝（見 <a href="https://github.com/Nocehi/dms-lookup/blob/main/docs/dictionary-sources.md">dictionary-sources.md</a>）。</p>
+        <p>需要 Wayland、Quickshell、wl-clipboard 與 <span class="mono">sdcv</span>；DMS 並非必要。字典需按授權另行安裝（見 <a href="https://github.com/Nocehi/dms-lookup/blob/main/docs/dictionary-sources.md">dictionary-sources.md</a>）。</p>
 <pre class="code"><span class="c-prompt">$ </span><span class="c-cmd">git clone</span> <span class="c-path">https://github.com/Nocehi/dms-lookup</span>
 <span class="c-prompt">$ </span><span class="c-cmd">bash</span> <span class="c-path">dms-lookup/packaging/install-user.sh</span>
-<span class="c-prompt">$ </span><span class="c-cmd">dms ipc call plugins reload</span> <span class="c-path">dankLookup</span></pre>
+<span class="c-prompt">$ </span><span class="c-cmd">systemctl --user daemon-reload</span>
+<span class="c-prompt">$ </span><span class="c-cmd">systemctl --user enable --now</span> <span class="c-path">dank-lookup.service</span>
+<span class="c-comment"># optional DMS wrapper: install-user.sh --with-dms</span></pre>
         <div class="keybind-row">
           <span class="k-label">trigger</span>
           <span class="kbd">Mod</span><span class="plus">+</span>

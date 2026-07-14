@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "required_groups": {
+    "unit_logs": ["tests/evidence/release/unit/*.log"],
+    "integration_logs": ["tests/evidence/release/integration/*.log"],
+    "pre_release_logs": ["tests/evidence/release/pre-release/*.log"],
+    "qml_logs": ["tests/evidence/release/qml/*.log"],
+    "sdcv_gate_report": ["tests/evidence/sdcv-stdin/gate-*/report.json"],
+    "sdcv_gate_raw": ["tests/evidence/sdcv-stdin/gate-*/*.stdout.bin"],
+    "socket_decision": ["tests/evidence/socket-architecture/gate-*/decision.md"],
+    "socket_gate_report": ["tests/evidence/socket-architecture/gate-*/report.json"],
+    "selection_raw_latency": ["tests/evidence/release/selection/*raw*.json"],
+    "selection_tradeoff_report": ["tests/evidence/release/selection/*report*.json"],
+    "backend_raw_benchmark": ["tests/evidence/release/benchmarks/backend*.json"],
+    "qml_raw_benchmark": ["tests/evidence/release/benchmarks/qml*.json"],
+    "giant_rss": ["tests/evidence/giant-entry-memory/*/report.json"],
+    "wayland_owner": ["tests/evidence/release/wayland/*.json"],
+    "dms_session_owner": ["tests/evidence/release/wayland/*dms*.json"],
+    "percentile_recalculation": ["tests/evidence/release/recalculated/*.json"],
+    "privacy_logs": ["tests/evidence/release/privacy/*.log"],
+    "commands": ["tests/evidence/release/commands/*.txt"],
+    "environment": ["tests/evidence/release/environment/*.json"]
+  }
+}

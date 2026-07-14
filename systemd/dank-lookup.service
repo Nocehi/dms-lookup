@@ -1,0 +1,21 @@
+[Unit]
+Description=Dank Lookup standalone popup
+Documentation=https://github.com/Nocehi/dms-lookup
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+UMask=0077
+Environment=DANK_LOOKUP_COMMAND=%h/.local/bin/dank-lookup
+ExecStart=/usr/bin/env quickshell -c dank-lookup
+Restart=on-failure
+RestartSec=1s
+NoNewPrivileges=yes
+
+# The resident process only hosts the popup and its explicit IPC endpoint. It
+# does not monitor or read either clipboard. Selection reads happen only in the
+# user-invoked dank-lookup-selection command.
+
+[Install]
+WantedBy=graphical-session.target

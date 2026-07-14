@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+"""Standalone Dank Lookup command-line interface."""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import fcntl
+import json
+import os
+import pathlib
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import uuid
+
+
+def _find_libdir() -> pathlib.Path:
+    candidates = []
+    if os.environ.get("DANK_LOOKUP_LIBDIR"):
+        candidates.append(pathlib.Path(os.path.expanduser(os.environ["DANK_LOOKUP_LIBDIR"])))
+    candidates.append(pathlib.Path(__file__).resolve().parent.parent / "lib")
+    candidates.append(pathlib.Path(os.path.expanduser("~/.local/lib/dank-lookup")))
+    for candidate in candidates:
+        if (candidate / "dank_lookup_core.py").is_file():
+            return candidate
+    raise RuntimeError("Dank Lookup core is not installed")
+
+
+LIB_DIR = _find_libdir()
+sys.path.insert(0, str(LIB_DIR))
+
+from dank_lookup_core import lookup  # noqa: E402
+from dank_lookup_runtime import (  # noqa: E402
+    MAX_REQUEST_FRAME_BYTES,
+    PrivateBackendServer,
+    atomic_write_bytes,
+    backend_socket_path,
+    cleanup_private_basename_after_ttl,
+    cleanup_runtime,
+    find_full_entry,
+    read_request,
+    resolve_full_blob,
+    runtime_dir,
+    request_backend,
+    schedule_private_cleanup,
+    text_path,
+    write_full_blobs,
+    write_result,
+)
+
+
+MAX_OPEN_TEXT_BYTES = 8 * 1024 * 1024
+MAX_QUERY_BYTES = 64 * 1024
+
+
+def _emit(value: object) -> None:
+    sys.stdout.write(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def _read_query_stdin() -> str:
+    payload = sys.stdin.buffer.read(MAX_QUERY_BYTES + 1)
+    if len(payload) > MAX_QUERY_BYTES:
+        raise ValueError("query exceeds 64 KiB")
+    try:
+        return payload.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("query is not valid UTF-8") from exc
+
+
+def _lookup_command(args: argparse.Namespace) -> int:
+    try:
+        query = _read_query_stdin()
+        request_id = str(args.request_id or uuid.uuid4())
+        uuid.UUID(request_id)
+        sequence = int(args.sequence if args.sequence is not None else time.monotonic_ns())
+    except (ValueError, TypeError) as exc:
+        print(f"invalid lookup request: {exc}", file=sys.stderr)
+        return 2
+    if args.retain_runtime:
+        result, vault = lookup(
+            query,
+            config_path=args.config,
+            request_id=request_id,
+            sequence=sequence,
+            retain_entry_vault=True,
+            retain_full_blobs=True,
+        )
+        accepted = write_result(result, vault)
+        result["runtime"] = {
+            "retained": True,
+            "accepted_as_active": accepted,
+            "request_id": result["request_id"],
+        }
+    else:
+        envelope: dict[str, object] = {
+            "action": "lookup",
+            "request_id": request_id,
+            "sequence": sequence,
+            "query": query,
+        }
+        if args.config:
+            envelope["config"] = args.config
+        try:
+            result = _request_backend_with_cold_start(envelope, timeout=args.timeout)
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"lookup transport unavailable: {exc}", file=sys.stderr)
+            return 1
+    _emit(result)
+    return 0
+
+
+def _full_command(args: argparse.Namespace) -> int:
+    try:
+        if args.entry_id:
+            body = find_full_entry(args.request_id, args.entry_id)
+        else:
+            envelope = read_request(args.request_id)
+            result = envelope.get("result", {})
+            mode = args.mode or result.get("default_mode")
+            collection = "related_by_mode" if args.related else "results_by_mode"
+            body = result.get(collection, {}).get(mode, {}).get("full_body", "")
+            if not isinstance(body, str) or not body:
+                raise KeyError(mode)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        print(f"full entry unavailable: {exc}", file=sys.stderr)
+        return 1
+    sys.stdout.write(body)
+    if body and not body.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+def _spawn_opener(destination: pathlib.Path) -> int:
+    opener = os.environ.get("DANK_LOOKUP_OPENER", "xdg-open")
+    if os.path.sep not in opener and shutil.which(opener) is None:
+        print(f"opener not found: {opener}", file=sys.stderr)
+        return 1
+    try:
+        subprocess.Popen(
+            [opener, str(destination)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        print(f"could not open full text: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _open_text_command(args: argparse.Namespace) -> int:
+    payload = sys.stdin.buffer.read(MAX_OPEN_TEXT_BYTES + 1)
+    if len(payload) > MAX_OPEN_TEXT_BYTES:
+        print("refusing text larger than 8 MiB", file=sys.stderr)
+        return 2
+    try:
+        payload.decode("utf-8")
+    except UnicodeDecodeError:
+        print("open-text requires UTF-8 input", file=sys.stderr)
+        return 2
+    cleanup_runtime(60 * 60)
+    destination = text_path(args.request_id)
+    atomic_write_bytes(destination, payload)
+    schedule_private_cleanup(destination)
+    return _spawn_opener(destination)
+
+
+def _open_ref_command(args: argparse.Namespace) -> int:
+    try:
+        cleanup_runtime(60 * 60)
+        payload = sys.stdin.buffer.read(MAX_QUERY_BYTES + 1)
+        if len(payload) > MAX_QUERY_BYTES:
+            raise ValueError("query exceeds 64 KiB")
+        query = payload.decode("utf-8").strip()
+        if not query:
+            raise ValueError("query is empty")
+        _result, vault = lookup(
+            query,
+            config_path=args.config,
+            request_id=args.request_id,
+            retain_full_blobs=True,
+        )
+        body = vault.get("full_blobs", {}).get(args.ref)
+        if not isinstance(body, str):
+            raise KeyError(args.ref)
+        write_full_blobs(args.request_id, {args.ref: body})
+        destination = resolve_full_blob(args.request_id, args.ref, refresh_ttl=False)
+    except (OSError, RuntimeError, KeyError, ValueError, UnicodeDecodeError) as exc:
+        print(f"full reference unavailable: {exc}", file=sys.stderr)
+        return 1
+    return _spawn_opener(destination)
+
+
+def _cleanup_file_command(args: argparse.Namespace) -> int:
+    try:
+        cleanup_private_basename_after_ttl(
+            args.basename,
+            args.ttl,
+            expected_device=args.device,
+            expected_inode=args.inode,
+            expected_mtime_ns=args.mtime_ns,
+        )
+    except (OSError, RuntimeError, ValueError):
+        return 1
+    return 0
+
+
+def _backend_handler(default_config: str | None):
+    def handle(envelope: dict[str, object], cancel_event) -> dict[str, object]:
+        request_id = str(envelope["request_id"])
+        sequence = int(envelope["sequence"])
+        if cancel_event.is_set():
+            return {"request_id": request_id, "sequence": sequence, "status": "cancelled"}
+        result, _vault = lookup(
+            str(envelope.get("query", "")),
+            config_path=envelope.get("config") or default_config,
+            request_id=request_id,
+            sequence=sequence,
+            cancel_event=cancel_event,
+        )
+        if cancel_event.is_set():
+            return {"request_id": request_id, "sequence": sequence, "status": "cancelled"}
+        result["transport"] = {
+            "action": envelope["action"],
+            "source": envelope.get("source"),
+            "mode": envelope.get("mode"),
+        }
+        result["runtime"] = {"retained": False, "accepted_as_active": False}
+        return result
+
+    return handle
+
+
+def _backend_serve_command(args: argparse.Namespace) -> int:
+    cleanup_runtime()
+    server = PrivateBackendServer(
+        _backend_handler(args.config),
+        idle_timeout=args.idle_timeout,
+        path=backend_socket_path(),
+    )
+    return server.serve()
+
+
+def _backend_unavailable(error: OSError) -> bool:
+    return isinstance(error, (FileNotFoundError, ConnectionRefusedError)) or error.errno in {
+        errno.ENOENT,
+        errno.ECONNREFUSED,
+    }
+
+
+def _backend_socket_ready(path: pathlib.Path) -> bool:
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.settimeout(0.05)
+        client.connect(str(path))
+        return True
+    except OSError:
+        return False
+    finally:
+        client.close()
+
+
+def _spawn_backend_service() -> int:
+    try:
+        idle_timeout = min(
+            3600.0,
+            max(0.1, float(os.environ.get("DANK_LOOKUP_BACKEND_IDLE_TIMEOUT", "30"))),
+        )
+    except ValueError:
+        idle_timeout = 30.0
+    argv = [
+        sys.executable,
+        str(pathlib.Path(__file__).resolve()),
+        "backend-serve",
+        "--idle-timeout",
+        str(idle_timeout),
+    ]
+    null_fd = os.open(os.devnull, os.O_RDWR)
+    try:
+        file_actions = [
+            (os.POSIX_SPAWN_DUP2, null_fd, 0),
+            (os.POSIX_SPAWN_DUP2, null_fd, 1),
+            (os.POSIX_SPAWN_DUP2, null_fd, 2),
+            (os.POSIX_SPAWN_CLOSE, null_fd),
+        ]
+        return os.posix_spawn(
+            sys.executable,
+            argv,
+            os.environ.copy(),
+            file_actions=file_actions,
+            setsid=True,
+        )
+    finally:
+        os.close(null_fd)
+
+
+def _request_backend_with_cold_start(
+    envelope: dict[str, object],
+    *,
+    timeout: float,
+) -> dict[str, object]:
+    path = backend_socket_path()
+    deadline = time.monotonic() + max(0.05, timeout)
+    try:
+        return request_backend(envelope, timeout=timeout, path=path)
+    except OSError as exc:
+        if not _backend_unavailable(exc):
+            raise
+
+    lock_path = runtime_dir() / "backend-start.lock"
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if not _backend_socket_ready(path):
+            _spawn_backend_service()
+            while time.monotonic() < deadline and not _backend_socket_ready(path):
+                time.sleep(0.01)
+            if not _backend_socket_ready(path):
+                raise TimeoutError("backend service did not become ready")
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("backend request deadline expired during cold start")
+    return request_backend(envelope, timeout=remaining, path=path)
+
+
+def _backend_request_command(args: argparse.Namespace) -> int:
+    payload = sys.stdin.buffer.read(MAX_REQUEST_FRAME_BYTES + 1)
+    if len(payload) > MAX_REQUEST_FRAME_BYTES:
+        print("backend request exceeds transport cap", file=sys.stderr)
+        return 2
+    try:
+        envelope = json.loads(payload.decode("utf-8"))
+        if not isinstance(envelope, dict):
+            raise ValueError("request must be an object")
+        response = _request_backend_with_cold_start(
+            envelope,
+            timeout=args.timeout,
+        )
+    except (OSError, RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print(f"backend request unavailable: {exc}", file=sys.stderr)
+        return 1
+    _emit(response)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Standalone offline dictionary lookup")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    lookup_parser = sub.add_parser("lookup", help="look up text using local StarDict dictionaries")
+    lookup_parser.add_argument("--request-id")
+    lookup_parser.add_argument("--sequence", type=int)
+    lookup_parser.add_argument("--config")
+    lookup_parser.add_argument("--timeout", type=float, default=10.0)
+    lookup_parser.add_argument(
+        "--retain-runtime",
+        action="store_true",
+        help="opt in to request-scoped result retention (disabled by default)",
+    )
+    lookup_parser.set_defaults(func=_lookup_command)
+
+    full_parser = sub.add_parser("full", help="retrieve a complete retained definition")
+    full_parser.add_argument("--request-id", required=True)
+    full_parser.add_argument("--entry-id")
+    full_parser.add_argument("--mode")
+    full_parser.add_argument("--related", action="store_true")
+    full_parser.set_defaults(func=_full_command)
+
+    open_parser = sub.add_parser("open-text", help="open UTF-8 stdin from a private runtime file")
+    open_parser.add_argument("--request-id", required=True)
+    open_parser.set_defaults(func=_open_text_command)
+
+    ref_parser = sub.add_parser("open-ref", help="open an oversized full body by opaque reference")
+    ref_parser.add_argument("--request-id", required=True)
+    ref_parser.add_argument("--ref", required=True)
+    ref_parser.add_argument("--config")
+    ref_parser.set_defaults(func=_open_ref_command)
+
+    cleanup_parser = sub.add_parser("cleanup", help="remove expired request-scoped runtime files")
+    cleanup_parser.add_argument("--max-age", type=int, default=0)
+    cleanup_parser.set_defaults(func=lambda args: (cleanup_runtime(args.max_age), 0)[1])
+
+    cleanup_file_parser = sub.add_parser(
+        "cleanup-file",
+        help=argparse.SUPPRESS,
+    )
+    cleanup_file_parser.add_argument("--basename", required=True)
+    cleanup_file_parser.add_argument("--ttl", type=float, required=True)
+    cleanup_file_parser.add_argument("--device", type=int, required=True)
+    cleanup_file_parser.add_argument("--inode", type=int, required=True)
+    cleanup_file_parser.add_argument("--mtime-ns", type=int, required=True)
+    cleanup_file_parser.set_defaults(func=_cleanup_file_command)
+
+    backend_serve_parser = sub.add_parser(
+        "backend-serve",
+        help="serve bounded stdin/socket lookup envelopes on the fixed private socket",
+    )
+    backend_serve_parser.add_argument("--idle-timeout", type=float, default=30.0)
+    backend_serve_parser.add_argument("--config")
+    backend_serve_parser.set_defaults(func=_backend_serve_command)
+
+    backend_request_parser = sub.add_parser(
+        "backend-request",
+        help="read one JSON envelope from stdin and send it to the fixed private socket",
+    )
+    backend_request_parser.add_argument("--timeout", type=float, default=10.0)
+    backend_request_parser.set_defaults(func=_backend_request_command)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    os.umask(0o077)
+    args = build_parser().parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

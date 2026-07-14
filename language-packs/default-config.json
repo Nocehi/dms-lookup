@@ -1,0 +1,133 @@
+{
+  "version": 2,
+  "stardict_data_dir": [
+    "~/.local/share/stardict/dic",
+    "/usr/share/stardict/dic"
+  ],
+  "definition_format_policy": {
+    "automatic": "ifo_exact_bookname_sametypesequence",
+    "fallback": "plain"
+  },
+  "preview": {
+    "max_entry_chars": 4000,
+    "max_body_chars": 12000,
+    "max_inline_full_chars": 262144
+  },
+  "modes": {
+    "han": {
+      "label": "漢語",
+      "enabled": true,
+      "default_for": ["han", "mixed"],
+      "show_related": false,
+      "sources": [
+        {
+          "name": "萌典重編國語辭典",
+          "data_dir": null,
+          "when": ["han", "mixed"],
+          "exact_only": true,
+          "allow_related": false
+        },
+        {
+          "name": "CC-CEDICT 漢英辭典",
+          "data_dir": null,
+          "when": ["han", "mixed"],
+          "exact_only": true,
+          "allow_related": false
+        },
+        {
+          "name": "XDICT漢英辭典",
+          "data_dir": null,
+          "when": ["han", "mixed"],
+          "exact_only": true,
+          "allow_related": false
+        }
+      ]
+    },
+    "en": {
+      "label": "English",
+      "enabled": true,
+      "default_for": ["latin", "mixed"],
+      "show_related": false,
+      "sources": [
+        {
+          "name": "wikt-en-en-2025-10-05",
+          "data_dir": null,
+          "when": ["latin", "mixed"],
+          "exact_only": false,
+          "allow_related": true
+        },
+        {
+          "name": "dictd_www.dict.org_gcide",
+          "data_dir": null,
+          "when": ["latin", "mixed"],
+          "exact_only": false,
+          "allow_related": true
+        },
+        {
+          "name": "WordNet",
+          "data_dir": null,
+          "when": ["latin", "mixed"],
+          "exact_only": false,
+          "allow_related": true
+        },
+        {
+          "name": "English-中文 (Zhōngwén) FreeDict+WikDict dictionary",
+          "data_dir": null,
+          "when": ["latin", "mixed"],
+          "exact_only": true,
+          "allow_related": false
+        },
+        {
+          "name": "XDICT英漢辭典",
+          "data_dir": null,
+          "when": ["latin", "mixed"],
+          "exact_only": true,
+          "allow_related": false
+        }
+      ]
+    },
+    "ja": {
+      "label": "日本語",
+      "enabled": true,
+      "default_for": ["kana", "han", "mixed"],
+      "priority_boost": ["kana"],
+      "show_related": false,
+      "sources": [
+        {
+          "name": "org.edrdg.jmdict-jpn-eng",
+          "data_dir": null,
+          "when": ["kana", "han", "mixed"],
+          "exact_only": true,
+          "allow_related": false
+        },
+        {
+          "name": "reader.dict JA",
+          "data_dir": null,
+          "when": ["kana", "han", "mixed"],
+          "exact_only": true,
+          "allow_related": false
+        }
+      ]
+    },
+    "yue": {
+      "label": "粵語",
+      "enabled": true,
+      "default_for": ["han", "mixed"],
+      "priority_boost": ["cantonese_marker"],
+      "show_related": false,
+      "sources": [
+        {
+          "name": "words.hk 粵語詞典",
+          "data_dir": null,
+          "when": ["han", "mixed", "cantonese_marker"],
+          "exact_only": true,
+          "allow_related": false
+        }
+      ]
+    }
+  },
+  "fallback": {
+    "mock": false,
+    "unfiltered": false
+  }
+}

@@ -1,35 +1,116 @@
 {
+  "schema_version": 2,
   "backend": "sdcv",
+  "query": "consolidate",
+  "request_id": "sample-request",
+  "sequence": 42,
+  "features": {
+    "has_han": false,
+    "has_kana": false,
+    "has_hiragana": false,
+    "has_katakana": false,
+    "has_latin": true,
+    "has_cantonese_marker": false,
+    "scripts": ["latin"],
+    "classes": ["latin"]
+  },
   "title": "consolidate",
-  "default_mode": "han-en",
-  "available_modes": ["han-en", "en-en"],
-  "subtitle": "Sample Chinese-English Dictionary",
-  "body": "[Sample Chinese-English Dictionary]\n/sample-definition/\n1. to make solid or firm.",
+  "subtitle": "Sample English Dictionary",
+  "body": "[Sample English Dictionary]\nconsolidate\n1. to join together into one whole.",
+  "truncated": false,
+  "query_truncated": false,
+  "candidate_modes": ["en"],
+  "installed_modes": ["en"],
+  "unavailable_modes": ["han", "ja", "yue"],
+  "available_modes": ["en"],
+  "default_mode": "en",
   "results_by_mode": {
-    "han-en": {
-      "label": "漢英",
-      "subtitle": "Sample Chinese-English Dictionary",
-      "body": "[Sample Chinese-English Dictionary]\n/sample-definition/\n1. to make solid or firm."
-    },
-    "en-en": {
-      "label": "英英",
+    "en": {
+      "label": "English",
       "subtitle": "Sample English Dictionary",
-      "body": "[Sample English Dictionary]\nConsolidate: to join together into one whole."
+      "body": "[Sample English Dictionary]\nconsolidate\n1. to join together into one whole.",
+      "full_body": "[Sample English Dictionary]\nconsolidate\n1. to join together into one whole.",
+      "full_ref": null,
+      "full_chars": 75,
+      "truncated": false,
+      "entries": [
+        {
+          "entry_id": "sample-entry",
+          "raw_ref": "sample-entry",
+          "word": "consolidate",
+          "source": "Sample English Dictionary",
+          "body": "1. to join together into one whole.",
+          "truncated": false
+        }
+      ],
+      "entry_count": 1,
+      "preview_entry_count": 1
     }
   },
-  "related_by_mode": {
-    "en-en": {
-      "label": "Related",
-      "subtitle": "Fallback Dictionary",
-      "body": "[Fallback Dictionary]\nConsolidation: the action of consolidating."
-    }
-  },
+  "related_by_mode": {},
   "mode_preferences": {
-    "en-en": { "show_related": false }
+    "han": {"show_related": false},
+    "en": {"show_related": false},
+    "ja": {"show_related": false},
+    "yue": {"show_related": false}
   },
+  "mode_status": {
+    "han": {
+      "candidate": false,
+      "configured_sources": ["Sample Chinese Dictionary"],
+      "eligible_sources": [],
+      "installed_sources": [],
+      "eligible_installed_sources": [],
+      "availability_unknown": [],
+      "available": false
+    },
+    "en": {
+      "candidate": true,
+      "configured_sources": ["Sample English Dictionary"],
+      "eligible_sources": ["Sample English Dictionary"],
+      "installed_sources": ["Sample English Dictionary"],
+      "eligible_installed_sources": ["Sample English Dictionary"],
+      "availability_unknown": [],
+      "available": true
+    },
+    "ja": {
+      "candidate": false,
+      "configured_sources": ["Sample Japanese Dictionary"],
+      "eligible_sources": [],
+      "installed_sources": [],
+      "eligible_installed_sources": [],
+      "availability_unknown": [],
+      "available": false
+    },
+    "yue": {
+      "candidate": false,
+      "configured_sources": ["Sample Cantonese Dictionary"],
+      "eligible_sources": [],
+      "installed_sources": [],
+      "eligible_installed_sources": [],
+      "availability_unknown": [],
+      "available": false
+    }
+  },
+  "segmented": false,
+  "tokens": [],
+  "token_items": [],
+  "results_by_token": {},
+  "segmentation": {"engine": null, "warning": null},
   "config": {
-    "path": null,
-    "loaded": false,
+    "path": "/example/config.json",
+    "loaded": true,
     "warning": null
+  },
+  "warnings": [],
+  "error": null,
+  "timing": {
+    "started_monotonic_ns": 123456789,
+    "backend_ms": 12.5,
+    "total_ms": 14.0
+  },
+  "runtime": {
+    "retained": false,
+    "accepted_as_active": false
   }
 }

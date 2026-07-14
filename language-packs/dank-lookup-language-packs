@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Inspect local StarDict availability and install Dank Lookup routing config.
+
+This utility never downloads dictionaries and never interprets a dictionary name
+as permission to redistribute its data.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+from typing import Any
+
+
+EXPECTED_MODES = ("han", "en", "ja", "yue")
+REDISTRIBUTION_STATES = {"unverified", "do_not_redistribute", "redistributable"}
+
+
+def resource_dir() -> Path:
+    source_dir = Path(__file__).resolve().parent
+    if (source_dir / "manifest.json").is_file():
+        return source_dir
+    return Path.home() / ".local/lib/dank-lookup/language-packs"
+
+
+def default_config_path() -> Path:
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config_home / "dank-lookup/config.json"
+
+
+def load_json(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def validate_manifest(manifest: Any) -> None:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 2:
+        raise ValueError("manifest schema_version must be 2")
+    modes = manifest.get("modes")
+    if not isinstance(modes, dict) or tuple(modes) != EXPECTED_MODES:
+        raise ValueError("manifest modes must be ordered han, en, ja, yue")
+    dictionaries = manifest.get("dictionaries")
+    if not isinstance(dictionaries, list) or not dictionaries:
+        raise ValueError("manifest dictionaries must be a non-empty array")
+
+    known_ids: set[str] = set()
+    for item in dictionaries:
+        if not isinstance(item, dict):
+            raise ValueError("each dictionary entry must be an object")
+        dictionary_id = item.get("id")
+        dictionary_name = item.get("dictionary_name")
+        if not isinstance(dictionary_id, str) or not dictionary_id:
+            raise ValueError("dictionary id must be a non-empty string")
+        if dictionary_id in known_ids:
+            raise ValueError(f"duplicate dictionary id: {dictionary_id}")
+        known_ids.add(dictionary_id)
+        if not isinstance(dictionary_name, str) or not dictionary_name:
+            raise ValueError(f"dictionary_name missing for {dictionary_id}")
+        if item.get("redistribution") not in REDISTRIBUTION_STATES:
+            raise ValueError(f"invalid redistribution state for {dictionary_id}")
+        if item.get("payload_included") is not False:
+            raise ValueError(f"dictionary payload must not be included: {dictionary_id}")
+        item_modes = item.get("modes")
+        if not isinstance(item_modes, list) or not item_modes:
+            raise ValueError(f"modes missing for {dictionary_id}")
+        if any(mode not in EXPECTED_MODES for mode in item_modes):
+            raise ValueError(f"unknown mode for {dictionary_id}")
+
+    for mode, mode_data in modes.items():
+        ids = mode_data.get("dictionary_ids") if isinstance(mode_data, dict) else None
+        if not isinstance(ids, list) or not ids:
+            raise ValueError(f"dictionary_ids missing for mode {mode}")
+        unknown = [dictionary_id for dictionary_id in ids if dictionary_id not in known_ids]
+        if unknown:
+            raise ValueError(f"unknown dictionary ids for mode {mode}: {unknown}")
+
+    policy = manifest.get("policy")
+    if not isinstance(policy, dict):
+        raise ValueError("manifest policy must be an object")
+    for key in ("dictionary_payload_included", "automatic_downloads", "network_install_supported"):
+        if policy.get(key) is not False:
+            raise ValueError(f"manifest policy {key} must be false")
+
+
+def installed_dictionaries() -> tuple[set[str], str | None]:
+    try:
+        completed = subprocess.run(
+            ["sdcv", "--list-dicts"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return set(), "sdcv is not installed"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return set(), f"could not run sdcv --list-dicts: {exc}"
+
+    output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+    names: set[str] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or line.lower().startswith("dictionary's name"):
+            continue
+        match = re.match(r"^(.*?)\s+(\d+)\s*$", line)
+        if match and match.group(1).strip():
+            names.add(match.group(1).strip())
+
+    if completed.returncode != 0:
+        return names, f"sdcv --list-dicts exited {completed.returncode}"
+    return names, None
+
+
+def build_status(manifest: dict[str, Any]) -> dict[str, Any]:
+    installed, error = installed_dictionaries()
+    dictionaries: list[dict[str, Any]] = []
+    detected_ids: set[str] = set()
+    for item in manifest["dictionaries"]:
+        detected = item["dictionary_name"] in installed
+        if detected:
+            detected_ids.add(item["id"])
+        dictionaries.append(
+            {
+                "id": item["id"],
+                "dictionary_name": item["dictionary_name"],
+                "modes": item["modes"],
+                "detected": detected,
+                "redistribution": item["redistribution"],
+                "payload_included": False,
+            }
+        )
+
+    modes: dict[str, Any] = {}
+    for mode, item in manifest["modes"].items():
+        found = [dictionary_id for dictionary_id in item["dictionary_ids"] if dictionary_id in detected_ids]
+        missing = [dictionary_id for dictionary_id in item["dictionary_ids"] if dictionary_id not in detected_ids]
+        modes[mode] = {
+            "label": item["label"],
+            "available": bool(found),
+            "detected_dictionary_ids": found,
+            "missing_dictionary_ids": missing,
+        }
+
+    return {
+        "schema_version": 1,
+        "sdcv_error": error,
+        "config_path": str(default_config_path()),
+        "config_exists": default_config_path().is_file(),
+        "modes": modes,
+        "dictionaries": dictionaries,
+    }
+
+
+def print_status(status: dict[str, Any], as_json: bool) -> None:
+    if as_json:
+        json.dump(status, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return
+
+    if status["sdcv_error"]:
+        print(f"sdcv: {status['sdcv_error']}")
+    else:
+        print("sdcv: available")
+    print(f"routing config: {'present' if status['config_exists'] else 'absent'} ({status['config_path']})")
+    print("modes:")
+    for mode, item in status["modes"].items():
+        state = "available" if item["available"] else "unavailable"
+        detected = ", ".join(item["detected_dictionary_ids"]) or "none"
+        print(f"  {mode:3}  {state:11} detected={detected}")
+    print("dictionary data is never downloaded or installed by this tool")
+
+
+def install_config(source: Path, destination: Path) -> bool:
+    config = load_json(source)
+    modes = config.get("modes") if isinstance(config, dict) else None
+    if not isinstance(modes, dict) or tuple(modes) != EXPECTED_MODES:
+        raise ValueError("default config modes must be ordered han, en, ja, yue")
+
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if destination.exists():
+        return False
+
+    fd, temporary_name = tempfile.mkstemp(prefix=".config.json.", dir=destination.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(config, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            return False
+        directory_fd = os.open(destination.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Inspect local Dank Lookup language packs without downloads")
+    parser.add_argument("--resource-dir", type=Path, default=resource_dir(), help=argparse.SUPPRESS)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    status_parser = subparsers.add_parser("status", help="report detected and missing dictionaries")
+    status_parser.add_argument("--json", action="store_true", help="emit machine-readable status")
+    install_parser = subparsers.add_parser(
+        "install-config", help="atomically install routing config only when it is absent"
+    )
+    install_parser.add_argument("--config", type=Path, default=default_config_path())
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        manifest = load_json(args.resource_dir / "manifest.json")
+        validate_manifest(manifest)
+        if args.command == "status":
+            print_status(build_status(manifest), args.json)
+            return 0
+        if args.command == "install-config":
+            destination = args.config.expanduser()
+            installed = install_config(args.resource_dir / "default-config.json", destination)
+            if installed:
+                print(f"installed routing config: {destination}")
+            else:
+                print(f"kept existing routing config: {destination}")
+            return 0
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"dank-lookup-language-packs: {exc}", file=sys.stderr)
+        return 2
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
