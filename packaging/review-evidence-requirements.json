@@ -19,6 +19,7 @@
     "percentile_recalculation": ["tests/evidence/release/recalculated/*.json"],
     "privacy_logs": ["tests/evidence/release/privacy/*.log"],
     "commands": ["tests/evidence/release/commands/*.txt"],
-    "environment": ["tests/evidence/release/environment/*.json"]
+    "environment": ["tests/evidence/release/environment/*.json"],
+    "release_binding": ["tests/evidence/release/binding/*.json"]
   }
 }

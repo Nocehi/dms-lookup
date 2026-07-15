@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import pathlib
@@ -9,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -32,6 +35,13 @@ assert BUNDLE_SPEC is not None and BUNDLE_SPEC.loader is not None
 review_bundle = importlib.util.module_from_spec(BUNDLE_SPEC)
 BUNDLE_SPEC.loader.exec_module(review_bundle)
 
+EVIDENCE_SPEC = importlib.util.spec_from_file_location(
+    "release_evidence", PACKAGING / "release_evidence.py"
+)
+assert EVIDENCE_SPEC is not None and EVIDENCE_SPEC.loader is not None
+release_evidence = importlib.util.module_from_spec(EVIDENCE_SPEC)
+EVIDENCE_SPEC.loader.exec_module(release_evidence)
+
 
 class ManagedManifestUnitTests(unittest.TestCase):
     def test_path_traversal_and_unknown_roots_are_rejected(self):
@@ -46,6 +56,301 @@ class ManagedManifestUnitTests(unittest.TestCase):
 
 
 class ReviewBundleUnitTests(unittest.TestCase):
+    def test_source_manifest_hashes_current_paths_and_bytes_with_release_exclusions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            candidates = []
+
+            def write(relative: str, value: str) -> pathlib.PurePosixPath:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(value, encoding="utf-8")
+                candidate = pathlib.PurePosixPath(relative)
+                candidates.append(candidate)
+                return candidate
+
+            source = write("lib/source.py", "one")
+            write(release_evidence.AUDIT_HANDOFF_NAME, "external audit")
+            write("tests/evidence/release/unit/run.log", "generated evidence")
+            write("build.log", "generated log")
+            write("__pycache__/source.pyc", "cache")
+            write("review.tar.gz", "archive")
+
+            first = release_evidence.canonical_source_manifest(root, candidates)
+            self.assertEqual(
+                [item["path"] for item in first["files"]],
+                [source.as_posix()],
+            )
+
+            (root / release_evidence.AUDIT_HANDOFF_NAME).write_text(
+                "changed external audit", encoding="utf-8"
+            )
+            (root / "tests/evidence/release/unit/run.log").write_text(
+                "changed evidence", encoding="utf-8"
+            )
+            self.assertEqual(
+                release_evidence.canonical_source_manifest(root, candidates)["digest"],
+                first["digest"],
+            )
+            (root / source.as_posix()).write_text("two", encoding="utf-8")
+            self.assertNotEqual(
+                release_evidence.canonical_source_manifest(root, candidates)["digest"],
+                first["digest"],
+            )
+
+    def test_release_binding_rejects_changed_or_mixed_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            requirements = root / "requirements.json"
+            requirements.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "required_groups": {
+                            "unit_logs": ["tests/evidence/release/unit/*.log"],
+                            "privacy_logs": ["tests/evidence/release/privacy/*.log"],
+                            "release_binding": ["tests/evidence/release/binding/*.json"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            source = root / "source.py"
+            source.write_text("release source", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "source.py", "requirements.json"], cwd=root, check=True)
+
+            context_path = base / "release-context.json"
+            context = release_evidence.create_context(root, context_path)
+            unit = root / "tests/evidence/release/unit/unit.log"
+            privacy = root / "tests/evidence/release/privacy/privacy.log"
+            unit.parent.mkdir(parents=True)
+            privacy.parent.mkdir(parents=True)
+            unit.write_text("UNIT: PASS\n", encoding="utf-8")
+            privacy.write_text("PRIVACY_TRANSPORT: PASS\n", encoding="utf-8")
+            release_evidence.record_evidence(root, context_path, [unit, privacy])
+            binding_path = (
+                root
+                / "tests/evidence/release/binding"
+                / f"{context['release_session_id']}.json"
+            )
+            release_evidence.finalize_binding(
+                root,
+                context_path,
+                requirements,
+                binding_path,
+            )
+            binding, selected = release_evidence.verify_binding(
+                root,
+                requirements,
+                binding_path,
+            )
+            self.assertEqual(binding["release_session_id"], context["release_session_id"])
+            self.assertEqual(selected["unit_logs"], [unit])
+            self.assertEqual(
+                binding["evidence"][unit.relative_to(root).as_posix()][
+                    "release_session_id"
+                ],
+                context["release_session_id"],
+            )
+            self.assertEqual(
+                binding["evidence"][unit.relative_to(root).as_posix()][
+                    "source_digest"
+                ],
+                context["source_manifest"]["digest"],
+            )
+
+            unit.write_text("UNIT: changed after binding\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                release_evidence.ReleaseEvidenceError,
+                "recorded evidence changed",
+            ):
+                release_evidence.verify_binding(root, requirements, binding_path)
+
+            unit.write_text("UNIT: PASS\n", encoding="utf-8")
+            other_context_path = base / "other-context.json"
+            release_evidence.create_context(root, other_context_path)
+            release_evidence.record_evidence(root, other_context_path, [unit])
+            other_binding = root / "tests/evidence/release/binding/other.json"
+            with self.assertRaisesRegex(
+                release_evidence.ReleaseEvidenceError,
+                "missing bound evidence groups: privacy_logs",
+            ):
+                release_evidence.finalize_binding(
+                    root,
+                    other_context_path,
+                    requirements,
+                    other_binding,
+                )
+
+    def test_staging_source_must_match_bound_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "source.py").write_text("before", encoding="utf-8")
+            manifest = release_evidence.canonical_source_manifest(
+                root, [pathlib.PurePosixPath("source.py")]
+            )
+            release_evidence.verify_staged_source(root, manifest)
+            (root / "source.py").write_text("after", encoding="utf-8")
+            with self.assertRaisesRegex(
+                release_evidence.ReleaseEvidenceError,
+                "staging source digest",
+            ):
+                release_evidence.verify_staged_source(root, manifest)
+
+    def test_one_orchestrator_sentinel_is_reused_only_through_anonymous_fds(self):
+        child = """
+import hashlib
+import os
+import struct
+import sys
+
+fd = int(sys.argv[sys.argv.index('--sentinel-fd') + 1])
+size = struct.unpack('>I', os.read(fd, 4))[0]
+value = b''
+while len(value) < size:
+    value += os.read(fd, size - len(value))
+argv_leak = any(value in item.encode() for item in sys.argv)
+env_leak = any(value in item.encode() for item in os.environ.values())
+print(hashlib.sha256(value).hexdigest(), int(argv_leak), int(env_leak))
+"""
+        random_value = b"R" * 32
+        expected = b"dank-lookup-privacy-" + random_value.hex().encode("ascii")
+        with mock.patch.object(
+            review_bundle.secrets,
+            "token_bytes",
+            return_value=random_value,
+        ) as generate:
+            dispatcher = review_bundle.SentinelPipeDispatcher()
+            first = dispatcher.run([sys.executable, "-c", child], cwd=ROOT)
+            second = dispatcher.run([sys.executable, "-c", child], cwd=ROOT)
+            dispatcher.discard()
+        self.assertEqual(generate.call_count, 1)
+        self.assertEqual(first.returncode, 0, first.stderr.decode())
+        self.assertEqual(second.returncode, 0, second.stderr.decode())
+        expected_line = f"{hashlib.sha256(expected).hexdigest()} 0 0\n".encode()
+        self.assertEqual(first.stdout, expected_line)
+        self.assertEqual(second.stdout, expected_line)
+
+    def test_archive_scan_checks_names_metadata_and_uncompressed_contents(self):
+        sentinel = b"dank-lookup-privacy-" + (b"a" * 64)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+
+            cases = {
+                "name": (f"safe/{sentinel.decode()}", {}, b"safe"),
+                "metadata": ("safe/member", {"comment": sentinel.decode()}, b"safe"),
+                "content": ("safe/member", {}, b"before-" + sentinel + b"-after"),
+            }
+            for case, (name, pax_headers, content) in cases.items():
+                with self.subTest(case=case):
+                    archive_path = root / f"{case}.tar.gz"
+                    with tarfile.open(
+                        archive_path,
+                        "w:gz",
+                        format=tarfile.PAX_FORMAT,
+                    ) as archive:
+                        info = tarfile.TarInfo(name)
+                        info.size = len(content)
+                        info.pax_headers = pax_headers
+                        archive.addfile(info, io.BytesIO(content))
+                    self.assertFalse(
+                        review_bundle.file_contains(archive_path, sentinel),
+                        "test must not pass through a compressed-stream match",
+                    )
+                    with self.assertRaisesRegex(
+                        review_bundle.BundleError,
+                        "archive member (metadata|content)",
+                    ):
+                        review_bundle.scan_archive_members(archive_path, sentinel)
+
+    def test_bundle_stages_only_bound_source_and_evidence_not_external_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            requirements = root / "requirements.json"
+            requirements.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "required_groups": {
+                            "unit_logs": ["tests/evidence/release/unit/*.log"],
+                            "privacy_logs": ["tests/evidence/release/privacy/*.log"],
+                            "release_binding": [
+                                "tests/evidence/release/binding/*.json"
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "source.py").write_text("candidate\n", encoding="utf-8")
+            (root / release_evidence.AUDIT_HANDOFF_NAME).write_text(
+                "external untracked handoff\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "add", "source.py", "requirements.json"],
+                cwd=root,
+                check=True,
+            )
+            context_path = base / "release-context.json"
+            context = release_evidence.create_context(root, context_path)
+            unit = root / "tests/evidence/release/unit/unit.log"
+            privacy = root / "tests/evidence/release/privacy/privacy.log"
+            historical = root / "tests/evidence/release/unit/historical.log"
+            unit.parent.mkdir(parents=True)
+            privacy.parent.mkdir(parents=True)
+            unit.write_text("UNIT: PASS\n", encoding="utf-8")
+            privacy.write_text("PRIVACY_TRANSPORT: PASS\n", encoding="utf-8")
+            historical.write_text("OLD: PASS\n", encoding="utf-8")
+            release_evidence.record_evidence(root, context_path, [unit, privacy])
+            binding = (
+                root
+                / "tests/evidence/release/binding"
+                / f"{context['release_session_id']}.json"
+            )
+            release_evidence.finalize_binding(
+                root, context_path, requirements, binding
+            )
+            output = base / "review.tar.gz"
+            sentinel = b"dank-lookup-privacy-" + (b"b" * 64)
+            with mock.patch.object(
+                review_bundle,
+                "validate_evidence_content",
+                return_value=None,
+            ):
+                review_bundle.build_bundle(
+                    root,
+                    output,
+                    requirements,
+                    binding,
+                    sentinel,
+                )
+            with tarfile.open(output, "r:gz") as archive:
+                names = {member.name for member in archive.getmembers()}
+                source_candidates = archive.extractfile(
+                    f"{review_bundle.ARCHIVE_ROOT}/review-metadata/source-candidates.txt"
+                )
+                assert source_candidates is not None
+                source_candidate_text = source_candidates.read().decode("utf-8")
+            self.assertFalse(
+                any(release_evidence.AUDIT_HANDOFF_NAME in name for name in names)
+            )
+            self.assertNotIn(release_evidence.AUDIT_HANDOFF_NAME, source_candidate_text)
+            self.assertFalse(any("historical.log" in name for name in names))
+            self.assertIn(
+                f"{review_bundle.ARCHIVE_ROOT}/{unit.relative_to(root).as_posix()}",
+                names,
+            )
+            self.assertIn(
+                f"{review_bundle.ARCHIVE_ROOT}/{binding.relative_to(root).as_posix()}",
+                names,
+            )
+
     def test_deleted_and_symlink_candidates_are_filtered_before_staging(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

@@ -25,8 +25,10 @@ included in benchmark output. For an oversized **Open full** re-fetch, QML
 sends the query to `open-ref` over bounded UTF-8 stdin. Copy sends the currently
 displayed body to `wl-copy` over stdin.
 
-Selection capture reports `success_nonempty`, `success_empty`, `unavailable`,
-`timeout`, or `command_error` separately for primary and clipboard. Clipboard
+Selection capture requests the Wayland `text` MIME type and streams at most
+16 KiB from each producer. It reports `success_nonempty`, `success_empty`,
+`success_whitespace`, `too_large`, `unavailable`, `timeout`, or `command_error`
+separately for primary and clipboard. Clipboard
 fallback happens only when primary is not `success_nonempty`; an all-empty or
 failed capture becomes a metadata-only UI state and never sends an empty query.
 `DANK_LOOKUP_PRIMARY_TIMEOUT_MS` and `DANK_LOOKUP_CLIPBOARD_TIMEOUT_MS` accept
@@ -71,7 +73,9 @@ The optional user service keeps only the Quickshell window/controller resident.
 It does not monitor the clipboard, pre-read text, contact the network, or retain
 queries. An idle-cleaned fixed-socket backend is cold-started only by an explicit
 request. Requests are correlated with a UUID and sequence; cancellation contains
-only that metadata, and stale completions cannot replace the active result.
+only that metadata. A cancellation received before the server's atomic response
+commit wins; one received after commit is acknowledged as unmatched. The
+frontend also prevents stale completions from replacing the active result.
 
 Opt-in benchmark mode retains numeric monotonic durations in memory and exposes
 them over IPC. It omits query text and result content and writes no telemetry

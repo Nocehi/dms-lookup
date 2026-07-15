@@ -400,7 +400,7 @@ class CliTests(unittest.TestCase):
                     kind=primary
                 fi
             done
-            printf '%s\n' "$kind" >> "$CAPTURE_CALL_LOG"
+            printf '%s\\n' "$kind" >> "$CAPTURE_CALL_LOG"
             if [ "$kind" = primary ]; then
                 mode=$FAKE_PRIMARY_MODE
                 value=${FAKE_PRIMARY_VALUE:-}
@@ -440,6 +440,7 @@ class CliTests(unittest.TestCase):
                 timeout=TEST_PROCESS_DEADLINE_SECONDS,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            self.assertEqual(completed.stderr, b"")
             return completed.stdout.decode().split("\n", 5)
 
         primary = capture("nonempty", "error", primary_value="primary text")
@@ -451,6 +452,11 @@ class CliTests(unittest.TestCase):
         fallback = capture("empty", "nonempty", clipboard_value="clipboard text")
         self.assertEqual(fallback[1:], [
             "success_nonempty", "clipboard", "success_empty", "success_nonempty", "clipboard text"
+        ])
+
+        whitespace = capture("nonempty", "empty", primary_value=" \t ")
+        self.assertEqual(whitespace[1:5], [
+            "success_empty", "none", "success_whitespace", "success_empty"
         ])
 
         timed_out = capture("timeout", "empty")
@@ -496,6 +502,75 @@ class CliTests(unittest.TestCase):
             unavailable.stdout.decode().split("\n", 5)[1:5],
             ["unavailable", "none", "unavailable", "unavailable"],
         )
+
+    def test_selection_capture_streams_text_with_a_hard_cap_and_reaps_producers(self):
+        command_dir = self.root / "bounded-selection-commands"
+        command_dir.mkdir()
+        pid_log = self.root / "selection-pids"
+        progress_dir = self.root / "selection-progress"
+        progress_dir.mkdir()
+        write_executable(
+            command_dir / "wl-paste",
+            """\
+            #!/usr/bin/python3
+            import os
+            import pathlib
+            import sys
+            import time
+
+            pid = os.getpid()
+            with open(os.environ["FAKE_PID_LOG"], "a", encoding="ascii") as handle:
+                handle.write(f"{pid} {' '.join(sys.argv[1:])}\\n")
+            progress = pathlib.Path(os.environ["FAKE_PROGRESS_DIR"]) / str(pid)
+            progress_fd = os.open(progress, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            written = 0
+            chunk = b"x" * 4096
+            while True:
+                os.write(1, chunk)
+                written += len(chunk)
+                os.write(progress_fd, f"{written}\\n".encode("ascii"))
+                time.sleep(0.005)
+            """,
+        )
+        environment = self.env()
+        environment.update(
+            {
+                "PATH": str(command_dir) + os.pathsep + environment["PATH"],
+                "FAKE_PID_LOG": str(pid_log),
+                "FAKE_PROGRESS_DIR": str(progress_dir),
+                "DANK_LOOKUP_PRIMARY_TIMEOUT_MS": "1000",
+                "DANK_LOOKUP_CLIPBOARD_TIMEOUT_MS": "1000",
+            }
+        )
+
+        started = time.monotonic()
+        completed = subprocess.run(
+            ["bash", str(SELECTION), "--capture"],
+            capture_output=True,
+            env=environment,
+            timeout=TEST_PROCESS_DEADLINE_SECONDS,
+        )
+        duration = time.monotonic() - started
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertLess(duration, 1.0, "capture reached timeout instead of the byte cap")
+        self.assertEqual(
+            completed.stdout.decode().split("\n", 5)[1:5],
+            ["too_large", "none", "too_large", "too_large"],
+        )
+        records = [line.split() for line in pid_log.read_text(encoding="ascii").splitlines()]
+        self.assertEqual(len(records), 2)
+        for record in records:
+            self.assertIn("--type", record)
+            self.assertIn("text", record)
+            pid = int(record[0])
+            self.assertFalse(pathlib.Path(f"/proc/{pid}").exists(), f"selection pid {pid} survived")
+            observed = max(
+                int(line)
+                for line in (progress_dir / str(pid)).read_text(encoding="ascii").splitlines()
+                if line.isdigit()
+            )
+            self.assertGreaterEqual(observed, 12 * 1024)
+            self.assertLessEqual(observed, 128 * 1024)
 
     def test_backend_request_cold_starts_fixed_service_for_all_lookup_actions(self):
         environment = self.env()

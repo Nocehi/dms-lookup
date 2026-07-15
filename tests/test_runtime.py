@@ -33,6 +33,7 @@ from dank_lookup_runtime import (  # noqa: E402
     validate_transport_envelope,
     blob_path,
     cleanup_private_basename_after_ttl,
+    cleanup_runtime,
     schedule_private_cleanup,
     write_full_blobs,
     write_result,
@@ -217,6 +218,15 @@ class RuntimeTests(unittest.TestCase):
             time.sleep(0.02)
             self.assertTrue(destination.exists(), "cleanup helper deleted the replacement")
         self.assertEqual(destination.read_bytes(), b"new")
+
+    def test_stale_cleanup_preserves_backend_start_lock(self):
+        lock_path = runtime_dir() / "backend-start.lock"
+        atomic_write_bytes(lock_path, b"")
+        old = time.time() - 120
+        os.utime(lock_path, (old, old), follow_symlinks=False)
+
+        self.assertEqual(cleanup_runtime(max_age_seconds=60), 0)
+        self.assertTrue(lock_path.is_file())
 
 
 if __name__ == "__main__":

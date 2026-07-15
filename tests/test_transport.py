@@ -19,10 +19,12 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import dank_lookup_runtime as runtime_module  # noqa: E402
 from dank_lookup_runtime import (  # noqa: E402
     MAX_REQUEST_FRAME_BYTES,
     MAX_RESPONSE_FRAME_BYTES,
     PrivateBackendServer,
+    RuntimeSecurityError,
     backend_socket_path,
     receive_transport_frame,
     request_backend,
@@ -51,12 +53,21 @@ class TransportIntegrationTests(unittest.TestCase):
         self.env.stop()
         self.temporary.cleanup()
 
-    def start_server(self, handler, *, idle_timeout=0.15, expected_uid=None):
+    def start_server(
+        self,
+        handler,
+        *,
+        idle_timeout=0.15,
+        expected_uid=None,
+        configure_server=None,
+    ):
         server = PrivateBackendServer(
             handler,
             idle_timeout=idle_timeout,
             expected_uid=expected_uid,
         )
+        if configure_server is not None:
+            configure_server(server)
         thread = threading.Thread(target=server.serve, daemon=True)
         thread.start()
         self.servers.append((server, thread))
@@ -138,6 +149,77 @@ class TransportIntegrationTests(unittest.TestCase):
         self.assertTrue(cancel["matched"])
         self.assertEqual(response["status"], "cancelled")
 
+    def test_cancel_before_response_commit_wins_atomically(self):
+        response_queued = threading.Event()
+        allow_commit = threading.Event()
+
+        def configure(server):
+            original = server._commit_response
+
+            def gated_commit(key, active, response):
+                response_queued.set()
+                self.assertTrue(allow_commit.wait(1.0))
+                return original(key, active, response)
+
+            server._commit_response = gated_commit
+
+        server, _thread = self.start_server(
+            self.echo_handler,
+            idle_timeout=0.5,
+            configure_server=configure,
+        )
+        lookup_envelope = envelope(31, "queued-cancel")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(request_backend, lookup_envelope)
+            self.assertTrue(response_queued.wait(1.0))
+            cancel = request_backend(
+                {
+                    "action": "cancel",
+                    "request_id": lookup_envelope["request_id"],
+                    "sequence": lookup_envelope["sequence"],
+                }
+            )
+            allow_commit.set()
+            response = future.result(timeout=2.0)
+        self.assertTrue(cancel["matched"])
+        self.assertEqual(response["status"], "cancelled")
+        with server._lock:
+            self.assertEqual(server._active, {})
+
+    def test_cancel_after_response_commit_is_unmatched(self):
+        send_started = threading.Event()
+        allow_send = threading.Event()
+        lookup_envelope = envelope(32, "committed-response")
+        original_send = runtime_module.send_transport_frame
+
+        def gated_send(connection, value, max_bytes):
+            if (
+                value.get("request_id") == lookup_envelope["request_id"]
+                and value.get("status") == "ok"
+            ):
+                send_started.set()
+                self.assertTrue(allow_send.wait(1.0))
+            return original_send(connection, value, max_bytes)
+
+        with mock.patch.object(runtime_module, "send_transport_frame", side_effect=gated_send):
+            server, _thread = self.start_server(self.echo_handler, idle_timeout=0.5)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(request_backend, lookup_envelope)
+                self.assertTrue(send_started.wait(1.0))
+                cancel = request_backend(
+                    {
+                        "action": "cancel",
+                        "request_id": lookup_envelope["request_id"],
+                        "sequence": lookup_envelope["sequence"],
+                    }
+                )
+                allow_send.set()
+                response = future.result(timeout=2.0)
+        self.assertFalse(cancel["matched"])
+        self.assertEqual(response["status"], "ok")
+        with server._lock:
+            self.assertEqual(server._active, {})
+
     def test_identity_pairing_supports_client_side_stale_rejection(self):
         _server, _thread = self.start_server(self.echo_handler)
         request_id = str(uuid.uuid4())
@@ -175,6 +257,119 @@ class TransportIntegrationTests(unittest.TestCase):
         thread.join(timeout=1.0)
         self.assertFalse(thread.is_alive())
         self.assertFalse(backend_socket_path(create=False).exists())
+
+    def test_live_socket_cannot_be_taken_over_or_unlinked_by_previous_server(self):
+        def identifying_handler(name):
+            def handle(_request, _cancel_event):
+                return {"status": "ok", "server": name}
+
+            return handle
+
+        first, first_thread = self.start_server(
+            identifying_handler("one"),
+            idle_timeout=0.25,
+        )
+        path = backend_socket_path()
+        first_identity = (path.lstat().st_dev, path.lstat().st_ino)
+        second = PrivateBackendServer(
+            identifying_handler("two"),
+            idle_timeout=1.0,
+            path=path,
+        )
+        second_errors: list[BaseException] = []
+
+        def serve_second():
+            try:
+                second.serve()
+            except BaseException as exc:  # captured for assertions from the test thread
+                second_errors.append(exc)
+
+        second_thread = threading.Thread(target=serve_second, daemon=True)
+        second_thread.start()
+        self.servers.append((second, second_thread))
+
+        deadline = time.monotonic() + 1.0
+        takeover_identity = first_identity
+        while time.monotonic() < deadline:
+            if path.is_socket():
+                info = path.lstat()
+                takeover_identity = (info.st_dev, info.st_ino)
+                if takeover_identity != first_identity:
+                    break
+            if not second_thread.is_alive():
+                break
+            time.sleep(0.01)
+
+        takeover = takeover_identity != first_identity
+        if takeover:
+            takeover_response = request_backend(envelope(8), path=path)
+            first_thread.join(timeout=1.5)
+            first_removed_replacement = not path.exists()
+            second_still_alive = second_thread.is_alive()
+            first._stop.set()
+            second._stop.set()
+            first_thread.join(timeout=1.0)
+            second_thread.join(timeout=1.0)
+            self.fail(
+                "second server took over the live socket "
+                f"(response_server={takeover_response.get('server')!r}); "
+                "the first server later removed the replacement socket "
+                f"(removed={first_removed_replacement}, "
+                f"second_alive={second_still_alive})"
+            )
+
+        self.assertFalse(second_thread.is_alive())
+        self.assertEqual(len(second_errors), 1)
+        self.assertIsInstance(second_errors[0], RuntimeSecurityError)
+        self.assertIn("already running", str(second_errors[0]))
+        current_info = path.lstat()
+        self.assertEqual((current_info.st_dev, current_info.st_ino), first_identity)
+        self.assertEqual(request_backend(envelope(9), path=path)["server"], "one")
+
+        # Exercise shutdown ownership independently: if the bound name is
+        # replaced, the previous server must not unlink the replacement.
+        path.unlink()
+        second_errors.clear()
+        second_thread = threading.Thread(target=serve_second, daemon=True)
+        second_thread.start()
+        self.servers.append((second, second_thread))
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            if path.is_socket():
+                break
+            if not second_thread.is_alive():
+                break
+            time.sleep(0.01)
+        self.assertTrue(path.is_socket(), second_errors)
+        replacement_info = path.lstat()
+        replacement_identity = (replacement_info.st_dev, replacement_info.st_ino)
+        self.assertNotEqual(replacement_identity, first_identity)
+
+        first_thread.join(timeout=1.5)
+        self.assertFalse(first_thread.is_alive())
+        self.assertTrue(path.is_socket())
+        current_info = path.lstat()
+        self.assertEqual((current_info.st_dev, current_info.st_ino), replacement_identity)
+        self.assertEqual(request_backend(envelope(10), path=path)["server"], "two")
+
+        second._stop.set()
+        second_thread.join(timeout=1.0)
+        self.assertFalse(second_thread.is_alive())
+
+    def test_owned_stale_socket_is_recovered(self):
+        path = backend_socket_path()
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(path))
+        stale_identity = (path.lstat().st_dev, path.lstat().st_ino)
+        stale.close()
+
+        _server, _thread = self.start_server(self.echo_handler)
+        current_info = path.lstat()
+        self.assertNotEqual(
+            (current_info.st_dev, current_info.st_ino),
+            stale_identity,
+        )
+        self.assertEqual(request_backend(envelope(11), path=path)["status"], "ok")
 
 
 if __name__ == "__main__":

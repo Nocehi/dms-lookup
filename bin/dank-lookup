@@ -34,6 +34,7 @@ sys.path.insert(0, str(LIB_DIR))
 
 from dank_lookup_core import lookup  # noqa: E402
 from dank_lookup_runtime import (  # noqa: E402
+    BACKEND_START_LOCK_NAME,
     MAX_REQUEST_FRAME_BYTES,
     PrivateBackendServer,
     atomic_write_bytes,
@@ -312,7 +313,7 @@ def _request_backend_with_cold_start(
         if not _backend_unavailable(exc):
             raise
 
-    lock_path = runtime_dir() / "backend-start.lock"
+    lock_path = runtime_dir() / BACKEND_START_LOCK_NAME
     lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         os.fchmod(lock_fd, 0o600)

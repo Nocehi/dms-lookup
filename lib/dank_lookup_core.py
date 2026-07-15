@@ -15,6 +15,7 @@ import json
 import os
 import pathlib
 import re
+import selectors
 import signal
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ from dank_lookup_sdcv_stdin import (
 
 SCHEMA_VERSION = 2
 MAX_QUERY_CHARS = 4096
+TOKENIZER_STDOUT_CAP_BYTES = 1024 * 1024
+TOKENIZER_STDERR_CAP_BYTES = 1024 * 1024
 # Four UTF-8 bytes per Unicode scalar keeps every inline body within the CLI's
 # 8 MiB open-text stdin limit. Larger complete bodies must use open-ref.
 MAX_INLINE_FULL_CHARS = 2 * 1024 * 1024
@@ -984,6 +987,78 @@ def _fallback_segment(query: str) -> list[str]:
     return tokens[:24]
 
 
+def _kill_tokenizer_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _read_bounded_tokenizer_output(
+    process: subprocess.Popen[bytes],
+    *,
+    deadline: float,
+    cancel_event: threading.Event | None,
+) -> tuple[bytes, bytes, str | None]:
+    assert process.stdout is not None and process.stderr is not None
+    selector = selectors.DefaultSelector()
+    for stream, label in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, label)
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    caps = {
+        "stdout": TOKENIZER_STDOUT_CAP_BYTES,
+        "stderr": TOKENIZER_STDERR_CAP_BYTES,
+    }
+    termination: str | None = None
+
+    def terminate(reason: str) -> None:
+        nonlocal termination
+        if termination is None:
+            termination = reason
+        _kill_tokenizer_process_group(process)
+
+    try:
+        while selector.get_map() or process.poll() is None:
+            now = time.monotonic()
+            if termination is None and cancel_event is not None and cancel_event.is_set():
+                terminate("cancelled")
+            if termination is None and now >= deadline:
+                terminate("timeout")
+            for key, _mask in selector.select(0.01):
+                label = str(key.data)
+                buffer = buffers[label]
+                remaining = max(0, caps[label] - len(buffer))
+                try:
+                    chunk = os.read(
+                        key.fileobj.fileno(),
+                        min(64 * 1024, remaining + 1),
+                    )
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if len(chunk) > remaining:
+                    buffer.extend(chunk[:remaining])
+                    terminate(f"{label}_cap")
+                else:
+                    buffer.extend(chunk)
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            terminate("wait_timeout")
+            process.wait(timeout=1.0)
+    finally:
+        selector.close()
+        if process.poll() is None:
+            terminate("runner_error")
+            process.wait(timeout=1.0)
+        process.stdout.close()
+        process.stderr.close()
+    return bytes(buffers["stdout"]), bytes(buffers["stderr"]), termination
+
+
 def _segment(
     query: str,
     features: Mapping[str, Any],
@@ -1000,6 +1075,8 @@ def _segment(
     language = "ja" if features.get("has_kana") else "zh" if features.get("has_han") else None
     if language is None:
         return [], None, None
+    if cancel_event is not None and cancel_event.is_set():
+        return [], None, "lookup_cancelled"
     process: subprocess.Popen[bytes] | None = None
     try:
         process = subprocess.Popen(
@@ -1014,42 +1091,34 @@ def _segment(
         process.stdin.close()
         process.stdin = None
         deadline = time.monotonic() + max(0.05, min(2.0, timeout_seconds))
-        termination = None
-        while process.poll() is None:
-            if cancel_event is not None and cancel_event.is_set():
-                termination = "cancelled"
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                break
-            if time.monotonic() >= deadline:
-                termination = "timeout"
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                break
-            time.sleep(0.005)
-        stdout, _stderr = process.communicate(timeout=1.0)
+        stdout, _stderr, termination = _read_bounded_tokenizer_output(
+            process,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
         if termination == "cancelled":
             return [], None, "lookup_cancelled"
-        if termination is not None or len(stdout) > 1024 * 1024:
-            raise subprocess.SubprocessError(termination or "tokenizer output exceeds cap")
+        if termination is not None:
+            raise subprocess.SubprocessError(termination)
         value = json.loads(stdout.decode("utf-8"))
         tokens = value.get("tokens", [])
         if process.returncode == 0 and isinstance(tokens, list):
             return [str(token) for token in tokens if str(token).strip()][:24], "external-tokenizer", None
     except (OSError, subprocess.SubprocessError, ValueError, UnicodeError, json.JSONDecodeError):
-        if process is not None and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        if process is not None:
+            if process.poll() is None:
+                _kill_tokenizer_process_group(process)
             try:
                 process.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
-                pass
+                _kill_tokenizer_process_group(process)
+                process.wait(timeout=1.0)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
     tokens = _fallback_segment(query)
     return tokens, "fallback-script-ngram" if len(tokens) > 1 else None, (
         "fallback_segmentation_nonlinguistic" if len(tokens) > 1 else None

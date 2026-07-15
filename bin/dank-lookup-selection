@@ -4,6 +4,7 @@ set -euo pipefail
 # This script reads the selection only when explicitly invoked. It never runs a
 # clipboard watcher and never interpolates selected text into shell code.
 umask 077
+CAPTURE_BYTE_CAP=16384
 
 timeout_ms() {
     local name="$1"
@@ -19,37 +20,115 @@ timeout_ms() {
 capture_one() {
     local kind="$1"
     local milliseconds="$2"
-    local seconds
     local output
     local code
-    printf -v seconds '%d.%03d' "$((milliseconds / 1000))" "$((milliseconds % 1000))"
     CAPTURE_VALUE=""
     if ! command -v wl-paste >/dev/null 2>&1; then
         CAPTURE_STATUS="unavailable"
         return
     fi
-    if [[ "$kind" == "primary" ]]; then
-        if output="$(timeout "$seconds" wl-paste --primary --no-newline 2>/dev/null)"; then
-            code=0
-        else
-            code=$?
-        fi
+    if output="$(python3 /dev/fd/3 "$kind" "$milliseconds" "$CAPTURE_BYTE_CAP" 3<<'PY'
+import os
+import selectors
+import signal
+import subprocess
+import sys
+import time
+
+
+kind = sys.argv[1]
+timeout_seconds = int(sys.argv[2]) / 1000
+cap_bytes = int(sys.argv[3])
+command = ["wl-paste", "--no-newline", "--type", "text"]
+if kind == "primary":
+    command.append("--primary")
+
+process = subprocess.Popen(
+    command,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+assert process.stdout is not None
+selector = selectors.DefaultSelector()
+os.set_blocking(process.stdout.fileno(), False)
+selector.register(process.stdout, selectors.EVENT_READ)
+payload = bytearray()
+deadline = time.monotonic() + timeout_seconds
+termination = None
+
+
+def kill_group(reason):
+    global termination
+    if termination is None:
+        termination = reason
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+try:
+    while selector.get_map() or process.poll() is None:
+        if termination is None and time.monotonic() >= deadline:
+            kill_group("timeout")
+        events = selector.select(0.01)
+        for key, _mask in events:
+            remaining = max(0, cap_bytes - len(payload))
+            try:
+                chunk = os.read(key.fileobj.fileno(), min(64 * 1024, remaining + 1))
+            except BlockingIOError:
+                continue
+            if not chunk:
+                selector.unregister(key.fileobj)
+                continue
+            if len(chunk) > remaining:
+                payload.extend(chunk[:remaining])
+                kill_group("too_large")
+            else:
+                payload.extend(chunk)
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        kill_group("wait_timeout")
+        process.wait(timeout=1.0)
+finally:
+    selector.close()
+    if process.poll() is None:
+        kill_group("runner_error")
+        process.wait(timeout=1.0)
+    process.stdout.close()
+
+if termination == "timeout":
+    raise SystemExit(124)
+if termination is not None:
+    raise SystemExit(125)
+if process.returncode != 0 or b"\0" in payload:
+    raise SystemExit(70)
+try:
+    text = payload.decode("utf-8")
+except UnicodeDecodeError:
+    raise SystemExit(70)
+sys.stdout.write(text)
+PY
+    )"; then
+        code=0
     else
-        if output="$(timeout "$seconds" wl-paste --no-newline 2>/dev/null)"; then
-            code=0
-        else
-            code=$?
-        fi
+        code=$?
     fi
     if (( code == 0 )); then
         CAPTURE_VALUE="$output"
         if [[ -n "${output//[[:space:]]/}" ]]; then
             CAPTURE_STATUS="success_nonempty"
+        elif [[ -n "$output" ]]; then
+            CAPTURE_STATUS="success_whitespace"
         else
             CAPTURE_STATUS="success_empty"
         fi
-    elif (( code == 124 || code == 137 )); then
+    elif (( code == 124 )); then
         CAPTURE_STATUS="timeout"
+    elif (( code == 125 )); then
+        CAPTURE_STATUS="too_large"
     else
         CAPTURE_STATUS="command_error"
     fi
@@ -123,7 +202,8 @@ ipc_call() {
 extract_id() {
     # Quickshell versions differ in whether IPC string returns are quoted or
     # prefixed with "Ret:". Accept only a conservative identifier afterwards.
-    sed -n 's/^.*Ret:[[:space:]]*//;s/^"//;s/"$//;${p;}' \
+    sed 's/^.*Ret:[[:space:]]*//;s/^"//;s/"$//' \
+        | tail -n 1 \
         | tr -cd 'A-Za-z0-9_.-'
 }
 

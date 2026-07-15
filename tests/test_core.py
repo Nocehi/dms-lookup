@@ -563,6 +563,72 @@ class StdinAdapterTests(unittest.TestCase):
             self.assertIn("--stdin", argv)
             self.assertNotIn(query, argv)
 
+    def test_external_tokenizer_streams_stdout_and_stderr_caps_then_reaps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            tokenizer = root / "tokenizer"
+            tokenizer.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/python3
+                    import os
+                    import pathlib
+                    import sys
+
+                    sys.stdin.readline()
+                    pid = os.getpid()
+                    pathlib.Path(os.environ["TOKENIZER_PID_FILE"]).write_text(str(pid), encoding="ascii")
+                    progress = pathlib.Path(os.environ["TOKENIZER_PROGRESS_FILE"])
+                    progress_fd = os.open(progress, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                    output = 2 if os.environ["TOKENIZER_STREAM"] == "stderr" else 1
+                    chunk = b"x" * (64 * 1024)
+                    written = 0
+                    while True:
+                        os.write(output, chunk)
+                        written += len(chunk)
+                        os.write(progress_fd, f"{written}\\n".encode("ascii"))
+                    """
+                ),
+                encoding="utf-8",
+            )
+            tokenizer.chmod(0o755)
+            for stream in ("stdout", "stderr"):
+                with self.subTest(stream=stream):
+                    pid_file = root / f"{stream}.pid"
+                    progress_file = root / f"{stream}.progress"
+                    environment = {
+                        "DANK_LOOKUP_TOKENIZER": str(tokenizer),
+                        "TOKENIZER_PID_FILE": str(pid_file),
+                        "TOKENIZER_PROGRESS_FILE": str(progress_file),
+                        "TOKENIZER_STREAM": stream,
+                    }
+                    started = time.monotonic()
+                    with mock.patch.dict(os.environ, environment, clear=False):
+                        tokens, engine, warning = _segment(
+                            "私密查詢",
+                            detect_features("私密查詢"),
+                            {},
+                            timeout_seconds=2.0,
+                        )
+                    duration = time.monotonic() - started
+                    self.assertLess(
+                        duration,
+                        1.5,
+                        f"{stream} reached timeout instead of its byte cap",
+                    )
+                    self.assertNotEqual(engine, "external-tokenizer")
+                    self.assertIsNotNone(warning)
+                    self.assertTrue(tokens)
+                    pid = int(pid_file.read_text(encoding="ascii"))
+                    self.assertFalse(pathlib.Path(f"/proc/{pid}").exists())
+                    observed = max(
+                        int(line)
+                        for line in progress_file.read_text(encoding="ascii").splitlines()
+                        if line.isdigit()
+                    )
+                    self.assertGreaterEqual(observed, 896 * 1024)
+                    self.assertLessEqual(observed, 2 * 1024 * 1024)
+
 
 class SdcvStdinProbeParserTests(unittest.TestCase):
     def test_exact_json_frame_has_unique_terminal_state(self):

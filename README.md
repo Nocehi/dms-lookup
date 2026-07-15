@@ -186,13 +186,23 @@ records real-Wayland owner pass/fail; without compositor timestamp evidence it
 emits no presentation latency. Default runtime writes no telemetry. Offscreen
 Quickshell IPC may need to run outside a filesystem/socket sandbox.
 
-`packaging/build-review-bundle.sh --output PATH` reads the privacy sentinel only
-from stdin. It refuses incomplete unit/integration/pre-release/QML, selection,
-backend/QML benchmark, giant-RSS, real-Wayland/DMS, privacy, command,
-environment, or percentile-recalculation evidence. Source candidates come from
-Git's tracked and untracked lists, deleted/non-regular candidates are filtered,
-and the final archive is checked bidirectionally against staging
-`included-files.txt`, SHA-256 checksums, and the sentinel scan. Missing
+Start a release context before collecting evidence, then record each generated
+evidence file with `packaging/release_evidence.py`. Finally run
+`packaging/build-review-bundle.sh --release-context CONTEXT --output PATH`.
+The context binds one release session and every selected evidence checksum to a
+canonical digest of the current source paths and bytes. Generated evidence,
+caches, archives, and the external audit handoff are excluded from that source
+digest and from source staging.
+
+The bundle command generates one privacy sentinel in orchestration-process
+memory, passes that same value to the privacy verifier and internal bundle
+builder through separate protected anonymous file descriptors, and never puts
+it in arguments, environment variables, logs, or release metadata. It refuses
+incomplete unit/integration/pre-release/QML, selection, backend/QML benchmark,
+giant-RSS, real-Wayland/DMS, privacy, command, environment, or percentile
+evidence. The final check reopens both tar and compressed archives and scans
+member names, metadata, and uncompressed contents, in addition to enforcing
+bidirectional `included-files.txt` and SHA-256 checksum parity. Missing
 historical evidence is never backfilled.
 
 Fixture sets now require an explicit config/backend; their results are reported

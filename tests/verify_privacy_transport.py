@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import pathlib
-import secrets
 import socket
 import subprocess
 import sys
@@ -20,6 +19,9 @@ from typing import Iterable
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CLI = ROOT / "bin/dank-lookup"
 SELECTION = ROOT / "bin/dank-lookup-selection"
+sys.path.insert(0, str(ROOT / "packaging"))
+
+from release_evidence import read_secret_fd  # noqa: E402
 
 
 class PrivacyFailure(RuntimeError):
@@ -87,7 +89,13 @@ def wait_for_socket(path: pathlib.Path, process: subprocess.Popen[bytes]) -> Non
     )
 
 
-def run_verifier(scan_paths: Iterable[pathlib.Path]) -> None:
+def run_verifier(scan_paths: Iterable[pathlib.Path], sentinel: bytes) -> None:
+    if len(sentinel) < 32 or b"\0" in sentinel or b"\n" in sentinel or b"\r" in sentinel:
+        raise PrivacyFailure("invalid protected privacy sentinel")
+    try:
+        sentinel_text = sentinel.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise PrivacyFailure("privacy sentinel is not ASCII") from exc
     with tempfile.TemporaryDirectory(prefix="dank-lookup-privacy-") as temporary:
         temp = pathlib.Path(temporary)
         runtime = temp / "runtime"
@@ -177,11 +185,8 @@ printf '%s\\n' '{"tokens":[]}'
             }
         )
 
-        # The sentinel is born only after every command, path, fixture, and
-        # environment value is fixed. Only its encoded query form is injected.
-        raw_sentinel = secrets.token_bytes(24)
-        query = "漢-" + raw_sentinel.hex()
-        protected_values = (raw_sentinel, query.encode("utf-8"))
+        query = "漢-" + sentinel_text
+        protected_values = (sentinel, query.encode("utf-8"))
         failures: list[str] = []
         snapshots: set[tuple[str, int]] = set()
 
@@ -358,9 +363,11 @@ printf '%s\\n' '{"tokens":[]}'
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scan-path", action="append", type=pathlib.Path, default=[])
+    parser.add_argument("--sentinel-fd", required=True, type=int)
     args = parser.parse_args(argv)
     try:
-        run_verifier(args.scan_path)
+        sentinel = read_secret_fd(args.sentinel_fd)
+        run_verifier(args.scan_path, sentinel)
     except Exception as exc:
         print(f"PRIVACY_TRANSPORT: FAIL: {exc}", file=sys.stderr)
         return 1

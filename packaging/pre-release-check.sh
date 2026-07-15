@@ -314,6 +314,7 @@ run_check managed_install_matrix python3 tests/test_packaging.py
 run_check required_files test -f LICENSE -a -f CHANGELOG.md -a -f README.md \
     -a -f packaging/managed-files.py -a -f packaging/legacy-managed-files.json \
     -a -f packaging/build-review-bundle.sh \
+    -a -f packaging/release_evidence.py \
     -a -f packaging/review-evidence-requirements.json
 
 echo

@@ -827,12 +827,12 @@ def gate(args: argparse.Namespace) -> int:
             argv=production_protocol_argv(
                 args.sdcv,
                 data_dir=str(data_root),
-                dictionaries=["DANK_STDIN_A"],
+                dictionaries=[GIANT_UNDER_BOOK],
                 exact=True,
             ),
             environment=environment,
             evidence_dir=evidence_dir,
-            query=None,
+            query="giant-under-cap",
             timeout_seconds=2.0,
             cancel_after_seconds=0.05,
         )
@@ -843,6 +843,8 @@ def gate(args: argparse.Namespace) -> int:
             cancel_errors.append("cancellation completion exceeded its upper bound")
         if not cancel_result["process_group_reaped"]:
             cancel_errors.append("cancelled process group was not reaped")
+        if "query_sent" not in cancel_result.get("runner_decisions", []):
+            cancel_errors.append("cancellation occurred before the lookup query was sent")
         cancel_result["errors"] = cancel_errors
         cancel_result["status"] = "pass" if not cancel_errors else "fail"
         cases.append(cancel_result)

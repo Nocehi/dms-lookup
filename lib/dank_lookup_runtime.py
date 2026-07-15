@@ -9,6 +9,7 @@ never made group/world accessible.
 from __future__ import annotations
 
 import atexit
+import errno
 import fcntl
 import json
 import os
@@ -30,6 +31,7 @@ from typing import Any, Callable, Iterable, Mapping
 RUNTIME_NAME = "dank-lookup"
 MAX_AGE_SECONDS = 24 * 60 * 60
 BACKEND_SOCKET_NAME = "backend.sock"
+BACKEND_START_LOCK_NAME = "backend-start.lock"
 MAX_REQUEST_FRAME_BYTES = 1024 * 1024
 MAX_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024
 MAX_TRANSPORT_QUERY_BYTES = 64 * 1024
@@ -245,6 +247,12 @@ def validate_transport_envelope(value: Mapping[str, Any]) -> dict[str, Any]:
 TransportHandler = Callable[[dict[str, Any], threading.Event], Mapping[str, Any]]
 
 
+class _ActiveTransportRequest:
+    def __init__(self) -> None:
+        self.cancel_event = threading.Event()
+        self.response_committed = False
+
+
 class PrivateBackendServer:
     """Concurrent fixed-socket server with bounded frames and metadata cancellation."""
 
@@ -262,37 +270,94 @@ class PrivateBackendServer:
         self.expected_uid = os.getuid() if expected_uid is None else int(expected_uid)
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        self._active: dict[tuple[str, int], threading.Event] = {}
+        self._active: dict[tuple[str, int], _ActiveTransportRequest] = {}
         self._workers: set[threading.Thread] = set()
         self._last_activity = time.monotonic()
+        self._bound_socket_identity: tuple[int, int] | None = None
 
     def _prepare_socket_path(self) -> None:
         root = runtime_dir()
         if self.path.parent.resolve(strict=True) != root.resolve(strict=True):
             raise RuntimeSecurityError("backend socket escapes private runtime directory")
-        if self.path.exists() or self.path.is_symlink():
-            info = self.path.lstat()
+        while True:
+            try:
+                info = self.path.lstat()
+            except FileNotFoundError:
+                return
             if info.st_uid != os.getuid() or not stat.S_ISSOCK(info.st_mode):
                 raise RuntimeSecurityError("refusing unsafe existing backend socket")
-            self.path.unlink()
+            identity = (info.st_dev, info.st_ino)
+
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.settimeout(0.1)
+                probe.connect(str(self.path))
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    continue
+                if exc.errno != errno.ECONNREFUSED:
+                    raise RuntimeSecurityError(
+                        "cannot prove existing backend socket is stale"
+                    ) from exc
+            else:
+                raise RuntimeSecurityError("backend server already running")
+            finally:
+                probe.close()
+
+            try:
+                current = self.path.lstat()
+            except FileNotFoundError:
+                return
+            if (current.st_dev, current.st_ino) != identity:
+                continue
+            if current.st_uid != os.getuid() or not stat.S_ISSOCK(current.st_mode):
+                raise RuntimeSecurityError("backend socket changed during stale check")
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+            return
 
     def _cancel(self, envelope: Mapping[str, Any]) -> dict[str, Any]:
         key = (str(envelope["request_id"]), int(envelope["sequence"]))
         with self._lock:
-            event = self._active.get(key)
-        if event is not None:
-            event.set()
+            active = self._active.get(key)
+            matched = active is not None and not active.response_committed
+            if matched:
+                active.cancel_event.set()
         return {
             "request_id": key[0],
             "sequence": key[1],
             "status": "cancel_ack",
-            "matched": event is not None,
+            "matched": matched,
         }
+
+    def _commit_response(
+        self,
+        key: tuple[str, int],
+        active: _ActiveTransportRequest,
+        response: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Atomically choose cancellation or commit before transport output."""
+
+        with self._lock:
+            if self._active.get(key) is not active:
+                raise TransportProtocolError("request_not_active")
+            if active.cancel_event.is_set():
+                response = {
+                    "request_id": key[0],
+                    "sequence": key[1],
+                    "status": "cancelled",
+                }
+            active.response_committed = True
+            return response
 
     def _serve_connection(self, connection: socket.socket) -> None:
         response: Mapping[str, Any]
         key: tuple[str, int] | None = None
-        cancel_event: threading.Event | None = None
+        active: _ActiveTransportRequest | None = None
         try:
             connection.settimeout(10.0)
             if transport_peer_uid(connection) != self.expected_uid:
@@ -304,20 +369,15 @@ class PrivateBackendServer:
                 response = self._cancel(envelope)
             else:
                 key = (envelope["request_id"], envelope["sequence"])
-                cancel_event = threading.Event()
+                active = _ActiveTransportRequest()
                 with self._lock:
                     if key in self._active:
                         raise TransportProtocolError("duplicate_request")
-                    self._active[key] = cancel_event
-                response = dict(self.handler(envelope, cancel_event))
+                    self._active[key] = active
+                response = dict(self.handler(envelope, active.cancel_event))
                 response.setdefault("request_id", key[0])
                 response.setdefault("sequence", key[1])
-                if cancel_event.is_set():
-                    response = {
-                        "request_id": key[0],
-                        "sequence": key[1],
-                        "status": "cancelled",
-                    }
+                response = self._commit_response(key, active, response)
             send_transport_frame(connection, response, MAX_RESPONSE_FRAME_BYTES)
         except TransportProtocolError as exc:
             try:
@@ -333,7 +393,8 @@ class PrivateBackendServer:
         finally:
             if key is not None:
                 with self._lock:
-                    self._active.pop(key, None)
+                    if self._active.get(key) is active:
+                        self._active.pop(key, None)
             connection.close()
             with self._lock:
                 self._workers.discard(threading.current_thread())
@@ -344,7 +405,14 @@ class PrivateBackendServer:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             server.bind(str(self.path))
+            bound_info = self.path.lstat()
+            if bound_info.st_uid != os.getuid() or not stat.S_ISSOCK(bound_info.st_mode):
+                raise RuntimeSecurityError("bound backend path is not an owned socket")
+            self._bound_socket_identity = (bound_info.st_dev, bound_info.st_ino)
             self.path.chmod(0o600)
+            current_info = self.path.lstat()
+            if (current_info.st_dev, current_info.st_ino) != self._bound_socket_identity:
+                raise RuntimeSecurityError("backend socket changed during bind")
             server.listen(32)
             server.settimeout(0.05)
             while not self._stop.is_set():
@@ -375,10 +443,18 @@ class PrivateBackendServer:
             for worker in workers:
                 worker.join(timeout=2.0)
             try:
-                if self.path.is_socket() and self.path.lstat().st_uid == os.getuid():
+                info = self.path.lstat()
+                if (
+                    self._bound_socket_identity is not None
+                    and info.st_uid == os.getuid()
+                    and stat.S_ISSOCK(info.st_mode)
+                    and (info.st_dev, info.st_ino) == self._bound_socket_identity
+                ):
                     self.path.unlink()
             except OSError:
                 pass
+            finally:
+                self._bound_socket_identity = None
         return 0
 
 
@@ -634,7 +710,13 @@ def cleanup_runtime(max_age_seconds: int = MAX_AGE_SECONDS, keep: Iterable[pathl
     cutoff = time.time() - max(0, max_age_seconds)
     removed = 0
     for path in root.iterdir():
-        if path.name in {"active.json", "active.lock", "server.sock", BACKEND_SOCKET_NAME}:
+        if path.name in {
+            "active.json",
+            "active.lock",
+            "server.sock",
+            BACKEND_SOCKET_NAME,
+            BACKEND_START_LOCK_NAME,
+        }:
             continue
         try:
             info = path.lstat()

@@ -1,261 +1,50 @@
 #!/usr/bin/env python3
-"""Evidence gate for the fixed private user-service socket candidate.
+"""Production full-stack gate for the fixed private backend socket.
 
-The service mode is a test-only prototype. It uses the proposed bounded,
-length-prefixed envelope and is launched with metadata-only argv. The gate
-selects the fixed socket only when lifecycle, privacy, cancellation, peer UID,
-concurrency, and stale-sequence contracts all pass.
+The gate loads the production CLI handler, runs the production
+``PrivateBackendServer``, and uses controllable fake sdcv/tokenizer executables
+only at the external process boundary. Cancellation is exercised while a real
+sdcv lookup is running, while the real tokenizer adapter is running, and while
+the server is waiting to commit a completed production response.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import datetime as dt
+import importlib.machinery
+import importlib.util
 import json
 import os
 import pathlib
 import socket
 import stat
-import struct
-import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
+import types
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Iterator, Mapping
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-MAX_FRAME_BYTES = 1024 * 1024
-HEADER = struct.Struct(">I")
+sys.path.insert(0, str(ROOT / "lib"))
+
+import dank_lookup_runtime as runtime_module  # noqa: E402
+from dank_lookup_runtime import (  # noqa: E402
+    PrivateBackendServer,
+    RuntimeSecurityError,
+    backend_socket_path,
+    request_backend,
+)
+
+
 PHASES = ("sdcv_running", "tokenizer_running", "response_queued")
-
-
-class TransportError(RuntimeError):
-    pass
-
-
-def runtime_root(base: pathlib.Path) -> pathlib.Path:
-    return base / "dank-lookup"
-
-
-def socket_path(base: pathlib.Path) -> pathlib.Path:
-    return runtime_root(base) / "backend.sock"
-
-
-def encode_frame(value: dict[str, Any]) -> bytes:
-    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if len(payload) > MAX_FRAME_BYTES:
-        raise TransportError("frame_too_large")
-    return HEADER.pack(len(payload)) + payload
-
-
-def recv_exact(connection: socket.socket, size: int) -> bytes:
-    chunks = bytearray()
-    while len(chunks) < size:
-        part = connection.recv(size - len(chunks))
-        if not part:
-            raise TransportError("unexpected_eof")
-        chunks.extend(part)
-    return bytes(chunks)
-
-
-def recv_frame(connection: socket.socket) -> dict[str, Any]:
-    length = HEADER.unpack(recv_exact(connection, HEADER.size))[0]
-    if length < 2 or length > MAX_FRAME_BYTES:
-        raise TransportError("invalid_frame_length")
-    try:
-        value = json.loads(recv_exact(connection, length).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise TransportError("invalid_frame_json") from exc
-    if not isinstance(value, dict):
-        raise TransportError("invalid_frame_shape")
-    return value
-
-
-def send_frame(connection: socket.socket, value: dict[str, Any]) -> None:
-    connection.sendall(encode_frame(value))
-
-
-def peer_uid(connection: socket.socket) -> int:
-    credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-    _pid, uid, _gid = struct.unpack("3i", credentials)
-    return uid
-
-
-class FixedSocketService:
-    def __init__(self, base: pathlib.Path, idle_timeout: float, expected_uid: int) -> None:
-        self.base = base
-        self.root = runtime_root(base)
-        self.path = socket_path(base)
-        self.idle_timeout = idle_timeout
-        self.expected_uid = expected_uid
-        self.stop_event = threading.Event()
-        self.lock = threading.Lock()
-        self.last_activity = time.monotonic()
-        self.active: dict[tuple[str, int], dict[str, Any]] = {}
-        self.cancel_events: dict[tuple[str, int], threading.Event] = {}
-        self.observed_peer_uids: set[int] = set()
-        self.workers: set[threading.Thread] = set()
-
-    def prepare_path(self) -> None:
-        self.root.mkdir(mode=0o700, parents=False, exist_ok=True)
-        root_info = self.root.lstat()
-        if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.getuid():
-            raise TransportError("unsafe_runtime_root")
-        if stat.S_IMODE(root_info.st_mode) != 0o700:
-            self.root.chmod(0o700)
-        if self.path.exists() or self.path.is_symlink():
-            info = self.path.lstat()
-            if info.st_uid != os.getuid() or not stat.S_ISSOCK(info.st_mode):
-                raise TransportError("unsafe_stale_socket")
-            self.path.unlink()
-
-    def status(self) -> dict[str, Any]:
-        with self.lock:
-            active = [
-                {"request_id": key[0], "sequence": key[1], "phase": value["phase"]}
-                for key, value in sorted(self.active.items())
-            ]
-            peers = sorted(self.observed_peer_uids)
-        return {"status": "ok", "active": active, "peer_uids": peers}
-
-    def _lookup(self, request: dict[str, Any]) -> dict[str, Any]:
-        request_id = str(request.get("request_id", ""))
-        sequence = int(request.get("sequence", -1))
-        key = (request_id, sequence)
-        cancel_event = threading.Event()
-        with self.lock:
-            self.cancel_events[key] = cancel_event
-            self.active[key] = {"phase": "accepted"}
-        delays = request.get("test_delays_ms", {})
-        if not isinstance(delays, dict):
-            delays = {}
-        try:
-            for phase in PHASES:
-                with self.lock:
-                    self.active[key]["phase"] = phase
-                delay = max(0.0, min(1.0, float(delays.get(phase, 0)) / 1000))
-                deadline = time.monotonic() + delay
-                while time.monotonic() < deadline:
-                    if cancel_event.wait(min(0.01, max(0.0, deadline - time.monotonic()))):
-                        return {
-                            "request_id": request_id,
-                            "sequence": sequence,
-                            "status": "cancelled",
-                            "phase": phase,
-                        }
-                if cancel_event.is_set():
-                    return {
-                        "request_id": request_id,
-                        "sequence": sequence,
-                        "status": "cancelled",
-                        "phase": phase,
-                    }
-            return {
-                "request_id": request_id,
-                "sequence": sequence,
-                "status": "ok",
-                "action": str(request.get("action", "")),
-                "source": request.get("source"),
-                "mode": request.get("mode"),
-                "query": str(request.get("query", "")),
-            }
-        finally:
-            with self.lock:
-                self.active.pop(key, None)
-                self.cancel_events.pop(key, None)
-                self.last_activity = time.monotonic()
-
-    def handle(self, connection: socket.socket) -> None:
-        shutdown_after_response = False
-        try:
-            uid = peer_uid(connection)
-            with self.lock:
-                self.observed_peer_uids.add(uid)
-            if uid != self.expected_uid:
-                send_frame(connection, {"error": {"code": "peer_uid_mismatch"}})
-                return
-            request = recv_frame(connection)
-            action = str(request.get("action", ""))
-            if action == "status":
-                response = self.status()
-            elif action == "cancel":
-                key = (str(request.get("request_id", "")), int(request.get("sequence", -1)))
-                with self.lock:
-                    event = self.cancel_events.get(key)
-                if event is not None:
-                    event.set()
-                response = {"status": "cancel_ack", "matched": event is not None}
-            elif action == "shutdown":
-                response = {"status": "shutdown_ack"}
-                shutdown_after_response = True
-            elif action in {"initial_selection", "source_change", "mode_change", "relookup", "lookup"}:
-                response = self._lookup(request)
-            else:
-                response = {"error": {"code": "invalid_action"}}
-            send_frame(connection, response)
-            if shutdown_after_response:
-                self.stop_event.set()
-        except (OSError, ValueError, TypeError, TransportError):
-            try:
-                send_frame(connection, {"error": {"code": "invalid_request"}})
-            except OSError:
-                pass
-        finally:
-            connection.close()
-            with self.lock:
-                self.last_activity = time.monotonic()
-                self.workers.discard(threading.current_thread())
-
-    def serve(self) -> int:
-        self.prepare_path()
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            server.bind(str(self.path))
-            self.path.chmod(0o600)
-            server.listen(32)
-            server.settimeout(0.02)
-            while not self.stop_event.is_set():
-                try:
-                    connection, _address = server.accept()
-                except socket.timeout:
-                    with self.lock:
-                        idle = not self.active and time.monotonic() - self.last_activity >= self.idle_timeout
-                    if idle:
-                        break
-                    continue
-                with self.lock:
-                    self.last_activity = time.monotonic()
-                worker = threading.Thread(target=self.handle, args=(connection,), daemon=True)
-                with self.lock:
-                    self.workers.add(worker)
-                worker.start()
-        finally:
-            server.close()
-            with self.lock:
-                workers = list(self.workers)
-            for worker in workers:
-                worker.join(timeout=2.0)
-            try:
-                if self.path.is_socket() and self.path.lstat().st_uid == os.getuid():
-                    self.path.unlink()
-            except OSError:
-                pass
-        return 0
-
-
-def request(path: pathlib.Path, envelope: dict[str, Any], timeout: float = 3.0) -> dict[str, Any]:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        client.settimeout(timeout)
-        client.connect(str(path))
-        send_frame(client, envelope)
-        return recv_frame(client)
-    finally:
-        client.close()
+_CLI_MODULE: types.ModuleType | None = None
 
 
 def wait_for(predicate: Callable[[], bool], timeout: float, label: str) -> None:
@@ -267,93 +56,39 @@ def wait_for(predicate: Callable[[], bool], timeout: float, label: str) -> None:
     raise AssertionError(f"timed out waiting for {label}")
 
 
-def wait_for_phase(path: pathlib.Path, request_id: str, sequence: int, phase: str) -> None:
-    def observed() -> bool:
-        try:
-            status = request(path, {"action": "status"}, timeout=0.2)
-        except OSError:
-            return False
-        return any(
-            item == {"request_id": request_id, "sequence": sequence, "phase": phase}
-            for item in status.get("active", [])
-        )
+def load_cli_module() -> types.ModuleType:
+    global _CLI_MODULE
+    if _CLI_MODULE is not None:
+        return _CLI_MODULE
+    path = ROOT / "bin/dank-lookup"
+    loader = importlib.machinery.SourceFileLoader("dank_lookup_gate_cli", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError("unable to load production CLI module")
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    _CLI_MODULE = module
+    return module
 
-    wait_for(observed, 2.0, f"{request_id}/{sequence} phase {phase}")
+
+def write_executable(path: pathlib.Path, body: str) -> pathlib.Path:
+    path.write_text(textwrap.dedent(body), encoding="utf-8")
+    path.chmod(0o700)
+    return path
 
 
-def start_service(
-    base: pathlib.Path,
-    evidence_dir: pathlib.Path,
-    label: str,
-    *,
-    idle_timeout: float = 5.0,
-    expected_uid: int | None = None,
-) -> tuple[subprocess.Popen[bytes], Any, Any]:
-    stdout_handle = (evidence_dir / f"{label}.service.stdout.log").open("wb")
-    stderr_handle = (evidence_dir / f"{label}.service.stderr.log").open("wb")
-    environment = os.environ.copy()
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            str(pathlib.Path(__file__).resolve()),
-            "--serve",
-            "--runtime-base",
-            str(base),
-            "--idle-timeout",
-            str(idle_timeout),
-            "--expected-uid",
-            str(os.getuid() if expected_uid is None else expected_uid),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=stdout_handle,
-        stderr=stderr_handle,
-        env=environment,
-        start_new_session=True,
-    )
-
-    def ready() -> bool:
-        if process.poll() is not None:
-            return False
-        if not socket_path(base).is_socket():
-            return False
-        try:
-            response = request(socket_path(base), {"action": "status"}, timeout=0.1)
-        except (OSError, TransportError):
-            return False
-        return response.get("status") == "ok" or response == {
-            "error": {"code": "peer_uid_mismatch"}
-        }
-
+@contextlib.contextmanager
+def patched_environment(values: Mapping[str, str]) -> Iterator[None]:
+    previous = {key: os.environ.get(key) for key in values}
+    os.environ.update(values)
     try:
-        wait_for(ready, 3.0, f"{label} service socket")
-    except BaseException:
-        process.kill()
-        process.wait(timeout=1.0)
-        stdout_handle.close()
-        stderr_handle.close()
-        raise
-    return process, stdout_handle, stderr_handle
-
-
-def stop_service(
-    process: subprocess.Popen[bytes],
-    path: pathlib.Path,
-    stdout_handle: Any,
-    stderr_handle: Any,
-) -> None:
-    if process.poll() is None:
-        try:
-            request(path, {"action": "shutdown"}, timeout=1.0)
-        except OSError:
-            pass
-    try:
-        process.wait(timeout=3.0)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=1.0)
-    stdout_handle.close()
-    stderr_handle.close()
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 class ActiveSequenceTracker:
@@ -371,12 +106,376 @@ class ActiveSequenceTracker:
         return True
 
 
-def run_gate(args: argparse.Namespace) -> int:
-    timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
-    evidence_dir = args.evidence_dir or (
-        ROOT / "tests/evidence/socket-architecture" / f"gate-{timestamp}"
+class ProductionStack:
+    def __init__(self, root: pathlib.Path) -> None:
+        self.root = root
+        self.runtime_base = root / "runtime"
+        self.runtime_base.mkdir(mode=0o700)
+        self.commands = root / "commands"
+        self.commands.mkdir(mode=0o700)
+        self.sdcv_pid_file = root / "sdcv.pids"
+        self.tokenizer_pid_file = root / "tokenizer.pids"
+        self.sdcv = self._write_sdcv()
+        self.tokenizer = self._write_tokenizer()
+        self.config = self._write_config()
+        self.server: PrivateBackendServer | None = None
+        self.thread: threading.Thread | None = None
+
+    def _write_sdcv(self) -> pathlib.Path:
+        return write_executable(
+            self.commands / "fake-sdcv",
+            """\
+            #!/usr/bin/python3
+            import json
+            import os
+            import pathlib
+            import subprocess
+            import sys
+            import time
+
+            if "--list-dicts" in sys.argv[1:]:
+                print("Dictionary's name   Word count")
+                print("FixtureDict   1")
+                raise SystemExit(0)
+
+            print("Enter word or phrase: ", end="", flush=True)
+            query = sys.stdin.readline().rstrip("\\n")
+            print(query, flush=True)
+            mode = os.environ.get("GATE_SDCV_MODE", "empty")
+            if mode == "block":
+                child = subprocess.Popen(
+                    ["/usr/bin/python3", "-c", "import time; time.sleep(60)"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                pathlib.Path(os.environ["GATE_SDCV_PID_FILE"]).write_text(
+                    f"{os.getpid()} {child.pid}", encoding="ascii"
+                )
+                while True:
+                    time.sleep(1)
+
+            entries = []
+            if mode == "hit" and not query.startswith("/"):
+                entries = [{
+                    "dict": "FixtureDict",
+                    "word": query,
+                    "definition": "production full-stack fixture",
+                }]
+            print(json.dumps(entries, ensure_ascii=False), flush=True)
+            print("Enter word or phrase: ", flush=True)
+            """,
+        )
+
+    def _write_tokenizer(self) -> pathlib.Path:
+        return write_executable(
+            self.commands / "fake-tokenizer",
+            """\
+            #!/usr/bin/python3
+            import json
+            import os
+            import pathlib
+            import subprocess
+            import sys
+            import time
+
+            query = sys.stdin.readline().rstrip("\\n")
+            if os.environ.get("GATE_TOKENIZER_MODE", "pass") == "block":
+                child = subprocess.Popen(
+                    ["/usr/bin/python3", "-c", "import time; time.sleep(60)"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                pathlib.Path(os.environ["GATE_TOKENIZER_PID_FILE"]).write_text(
+                    f"{os.getpid()} {child.pid}", encoding="ascii"
+                )
+                while True:
+                    time.sleep(1)
+            print(json.dumps({"tokens": [query]}, ensure_ascii=False))
+            """,
+        )
+
+    def _write_config(self) -> pathlib.Path:
+        path = self.root / "config.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "tokenizer": str(self.tokenizer),
+                    "source_timeout_ms": 5000,
+                    "lookup_timeout_ms": 8000,
+                    "modes": {
+                        "han": {
+                            "label": "Fixture Han",
+                            "enabled": True,
+                            "default_for": ["han"],
+                            "sources": [
+                                {
+                                    "name": "FixtureDict",
+                                    "when": "han",
+                                    "exact_only": True,
+                                }
+                            ],
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def environment(self) -> dict[str, str]:
+        return {
+            "XDG_RUNTIME_DIR": str(self.runtime_base),
+            "DANK_LOOKUP_SDCV": str(self.sdcv),
+            "DANK_LOOKUP_TOKENIZER": str(self.tokenizer),
+            "DANK_LOOKUP_CONFIG": str(self.config),
+            "GATE_SDCV_PID_FILE": str(self.sdcv_pid_file),
+            "GATE_TOKENIZER_PID_FILE": str(self.tokenizer_pid_file),
+            "GATE_SDCV_MODE": "empty",
+            "GATE_TOKENIZER_MODE": "pass",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+    @property
+    def path(self) -> pathlib.Path:
+        return backend_socket_path()
+
+    def start(
+        self,
+        configure: Callable[[PrivateBackendServer], None] | None = None,
+        *,
+        idle_timeout: float = 10.0,
+    ) -> None:
+        handler = load_cli_module()._backend_handler(str(self.config))
+        self.server = PrivateBackendServer(
+            handler,
+            idle_timeout=idle_timeout,
+            path=self.path,
+        )
+        if configure is not None:
+            configure(self.server)
+        self.thread = threading.Thread(target=self.server.serve, daemon=True)
+        self.thread.start()
+
+        def ready() -> bool:
+            if self.thread is None or not self.thread.is_alive() or not self.path.is_socket():
+                return False
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.settimeout(0.1)
+                probe.connect(str(self.path))
+                return True
+            except OSError:
+                return False
+            finally:
+                probe.close()
+
+        wait_for(ready, 3.0, "production backend socket")
+
+    def stop(self) -> None:
+        if self.server is not None:
+            self.server._stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout=3.0)
+            if self.thread.is_alive():
+                raise AssertionError("production backend server did not stop")
+        self.server = None
+        self.thread = None
+
+    def request(self, value: Mapping[str, Any], timeout: float = 5.0) -> dict[str, Any]:
+        return request_backend(value, timeout=timeout, path=self.path)
+
+    def active_snapshot(self) -> dict[tuple[str, int], dict[str, bool]]:
+        assert self.server is not None
+        with self.server._lock:
+            return {
+                key: {
+                    "cancelled": active.cancel_event.is_set(),
+                    "response_committed": active.response_committed,
+                }
+                for key, active in self.server._active.items()
+            }
+
+    @staticmethod
+    def envelope(sequence: int, query: str, request_id: str | None = None) -> dict[str, Any]:
+        return {
+            "action": "lookup",
+            "request_id": request_id or str(uuid.uuid4()),
+            "sequence": sequence,
+            "query": query,
+            "source": "selection",
+        }
+
+    @staticmethod
+    def cancel_for(value: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "action": "cancel",
+            "request_id": value["request_id"],
+            "sequence": value["sequence"],
+        }
+
+
+def read_process_tree(path: pathlib.Path) -> list[int]:
+    wait_for(lambda: path.is_file() and bool(path.read_text(encoding="ascii").strip()), 3.0, path.name)
+    return [int(value) for value in path.read_text(encoding="ascii").split()]
+
+
+def assert_query_is_payload_only(query: str, pids: list[int]) -> None:
+    needle = query.encode("utf-8")
+    for pid in pids:
+        cmdline = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
+        environ = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
+        assert needle not in cmdline
+        assert needle not in environ
+
+
+def wait_for_process_tree_exit(pids: list[int]) -> None:
+    wait_for(
+        lambda: all(not pathlib.Path(f"/proc/{pid}").exists() for pid in pids),
+        3.0,
+        f"process tree exit {pids}",
     )
-    evidence_dir.mkdir(parents=True, mode=0o700)
+
+
+def assert_registry_empty(stack: ProductionStack) -> None:
+    wait_for(lambda: not stack.active_snapshot(), 2.0, "empty active registry")
+
+
+def run_process_cancellation_case(stack: ProductionStack, phase: str) -> dict[str, Any]:
+    assert phase in {"sdcv_running", "tokenizer_running"}
+    pid_file = stack.sdcv_pid_file if phase == "sdcv_running" else stack.tokenizer_pid_file
+    pid_file.unlink(missing_ok=True)
+    os.environ["GATE_SDCV_MODE"] = "block" if phase == "sdcv_running" else "empty"
+    os.environ["GATE_TOKENIZER_MODE"] = "block" if phase == "tokenizer_running" else "pass"
+    query = "取消查詢"
+    envelope = stack.envelope(100 + PHASES.index(phase), query)
+    key = (str(envelope["request_id"]), int(envelope["sequence"]))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(stack.request, envelope)
+        pids = read_process_tree(pid_file)
+        wait_for(lambda: key in stack.active_snapshot(), 1.0, f"active {phase}")
+        assert_query_is_payload_only(query, pids)
+        cancel = stack.request(stack.cancel_for(envelope))
+        response = future.result(timeout=5.0)
+    assert cancel == {
+        "request_id": envelope["request_id"],
+        "sequence": envelope["sequence"],
+        "status": "cancel_ack",
+        "matched": True,
+    }
+    assert response == {
+        "request_id": envelope["request_id"],
+        "sequence": envelope["sequence"],
+        "status": "cancelled",
+    }
+    wait_for_process_tree_exit(pids)
+    assert_registry_empty(stack)
+    return {
+        "phase": phase,
+        "process_tree_pids": pids,
+        "process_tree_reaped": True,
+        "active_registry_empty": True,
+    }
+
+
+def run_response_queue_case(stack: ProductionStack) -> dict[str, Any]:
+    os.environ["GATE_SDCV_MODE"] = "hit"
+    os.environ["GATE_TOKENIZER_MODE"] = "pass"
+    request_id = str(uuid.uuid4())
+    old = stack.envelope(200, "排隊回應", request_id)
+    new = stack.envelope(201, "較新回應", request_id)
+    target = (request_id, 200)
+    response_queued = threading.Event()
+    allow_commit = threading.Event()
+    assert stack.server is not None
+    original_commit = stack.server._commit_response
+
+    def gated_commit(key, active, response):
+        if key == target:
+            response_queued.set()
+            if not allow_commit.wait(3.0):
+                raise AssertionError("response commit barrier timed out")
+        return original_commit(key, active, response)
+
+    stack.server._commit_response = gated_commit
+    tracker = ActiveSequenceTracker()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            old_future = executor.submit(stack.request, old)
+            assert response_queued.wait(3.0)
+            tracker.activate(201)
+            new_response = stack.request(new)
+            assert tracker.apply(new_response)
+            cancel = stack.request(stack.cancel_for(old))
+            allow_commit.set()
+            old_response = old_future.result(timeout=5.0)
+    finally:
+        allow_commit.set()
+        stack.server._commit_response = original_commit
+    assert cancel["matched"] is True
+    assert old_response["status"] == "cancelled"
+    assert not tracker.apply(old_response)
+    assert tracker.value is not None and tracker.value["sequence"] == 201
+    assert_registry_empty(stack)
+    return {
+        "phase": "response_queued",
+        "cancel_won_before_commit": True,
+        "new_sequence_applied": 201,
+        "old_sequence_rejected": True,
+        "active_registry_empty": True,
+    }
+
+
+def run_post_commit_case(stack: ProductionStack) -> dict[str, Any]:
+    os.environ["GATE_SDCV_MODE"] = "hit"
+    envelope = stack.envelope(300, "已提交回應")
+    key = (str(envelope["request_id"]), int(envelope["sequence"]))
+    send_started = threading.Event()
+    allow_send = threading.Event()
+    original_send = runtime_module.send_transport_frame
+
+    def gated_send(connection, value, max_bytes):
+        if (
+            value.get("request_id") == envelope["request_id"]
+            and value.get("sequence") == envelope["sequence"]
+            and "action" not in value
+            and value.get("status") != "cancel_ack"
+        ):
+            send_started.set()
+            if not allow_send.wait(3.0):
+                raise AssertionError("transport send barrier timed out")
+        return original_send(connection, value, max_bytes)
+
+    runtime_module.send_transport_frame = gated_send
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(stack.request, envelope)
+            assert send_started.wait(3.0)
+            snapshot = stack.active_snapshot()
+            assert snapshot[key]["response_committed"] is True
+            cancel = stack.request(stack.cancel_for(envelope))
+            allow_send.set()
+            response = future.result(timeout=5.0)
+    finally:
+        allow_send.set()
+        runtime_module.send_transport_frame = original_send
+    assert cancel["matched"] is False
+    assert response["sequence"] == envelope["sequence"]
+    assert response.get("status") != "cancelled"
+    assert_registry_empty(stack)
+    return {
+        "commit_semantics": "cancel_before_commit_wins_after_commit_unmatched",
+        "cancel_matched": False,
+        "normal_response_preserved": True,
+        "active_registry_empty": True,
+    }
+
+
+def execute_gate(evidence_dir: pathlib.Path) -> dict[str, Any]:
+    evidence_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     cases: list[dict[str, Any]] = []
 
     def check(name: str, operation: Callable[[], dict[str, Any] | None]) -> None:
@@ -397,241 +496,96 @@ def run_gate(args: argparse.Namespace) -> int:
             }
         )
 
-    with tempfile.TemporaryDirectory(prefix="dank-socket-gate-") as temporary:
-        base = pathlib.Path(temporary) / "runtime"
-        base.mkdir(mode=0o700)
-        path = socket_path(base)
-        service, stdout_handle, stderr_handle = start_service(base, evidence_dir, "primary")
-        try:
-            def permissions_case() -> dict[str, Any]:
-                root_mode = stat.S_IMODE(runtime_root(base).stat().st_mode)
-                socket_mode = stat.S_IMODE(path.lstat().st_mode)
-                assert path == base / "dank-lookup/backend.sock"
-                assert root_mode == 0o700
-                assert socket_mode == 0o600
-                status = request(path, {"action": "status"})
-                assert status["peer_uids"] == [os.getuid()]
-                return {"runtime_mode": oct(root_mode), "socket_mode": oct(socket_mode)}
-
-            check("fixed_path_permissions_peer_uid", permissions_case)
-
-            def cold_and_running() -> dict[str, Any]:
-                first = request(
-                    path,
-                    {
-                        "action": "initial_selection",
-                        "request_id": str(uuid.uuid4()),
-                        "sequence": 1,
-                        "query": "cold-query",
-                    },
-                )
-                second = request(
-                    path,
-                    {
-                        "action": "relookup",
-                        "request_id": str(uuid.uuid4()),
-                        "sequence": 2,
-                        "query": "warm-query",
-                    },
-                )
-                assert first["status"] == second["status"] == "ok"
-                return {"service_pid": service.pid}
-
-            check("cold_start_and_server_already_running", cold_and_running)
-
-            def concurrency_case() -> dict[str, Any]:
-                envelopes = [
-                    {
-                        "action": "lookup",
-                        "request_id": str(uuid.uuid4()),
-                        "sequence": index,
-                        "query": f"parallel-{index}",
-                        "test_delays_ms": {"sdcv_running": 30},
+    with tempfile.TemporaryDirectory(prefix="dank-production-socket-gate-") as temporary:
+        stack = ProductionStack(pathlib.Path(temporary))
+        with patched_environment(stack.environment()):
+            stack.start()
+            try:
+                def permissions_and_live_owner() -> dict[str, Any]:
+                    path = stack.path
+                    info = path.lstat()
+                    identity = (info.st_dev, info.st_ino)
+                    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+                    assert stat.S_IMODE(info.st_mode) == 0o600
+                    assert stack.server is not None
+                    contender = PrivateBackendServer(
+                        load_cli_module()._backend_handler(str(stack.config)),
+                        path=path,
+                    )
+                    try:
+                        contender.serve()
+                    except RuntimeSecurityError as exc:
+                        assert "already running" in str(exc)
+                    else:
+                        raise AssertionError("second production server took over live socket")
+                    current = path.lstat()
+                    assert (current.st_dev, current.st_ino) == identity
+                    return {
+                        "runtime_mode": "0o700",
+                        "socket_mode": "0o600",
+                        "live_owner_preserved": True,
                     }
-                    for index in range(5)
-                ]
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                    responses = list(executor.map(lambda value: request(path, value), envelopes))
-                expected = {(item["request_id"], item["sequence"]) for item in envelopes}
-                actual = {(item["request_id"], item["sequence"]) for item in responses}
-                assert actual == expected
-                return {"parallel_requests": len(responses)}
 
-            check("five_parallel_uuid_sequence_pairing", concurrency_case)
-
-            def unified_actions_case() -> dict[str, Any]:
-                actions = ("initial_selection", "source_change", "mode_change", "relookup")
-                responses = []
-                for sequence, action in enumerate(actions, 10):
-                    envelope = {
-                        "action": action,
-                        "request_id": str(uuid.uuid4()),
-                        "sequence": sequence,
-                        "source": "FixtureSource",
-                        "mode": "han",
-                        "query": "same-memory-query",
-                    }
-                    responses.append(request(path, envelope))
-                assert [item["action"] for item in responses] == list(actions)
-                assert all(item["query"] == "same-memory-query" for item in responses)
-                return {"actions": list(actions)}
-
-            check("unified_action_envelope", unified_actions_case)
-
-            for target_phase in PHASES:
-                def cancellation_case(phase: str = target_phase) -> dict[str, Any]:
-                    request_id = str(uuid.uuid4())
-                    sequence = 40 + PHASES.index(phase)
-                    envelope = {
-                        "action": "lookup",
-                        "request_id": request_id,
-                        "sequence": sequence,
-                        "query": "cancel-query",
-                        "test_delays_ms": {phase: 300},
-                    }
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(request, path, envelope)
-                        wait_for_phase(path, request_id, sequence, phase)
-                        cancel = request(
-                            path,
-                            {"action": "cancel", "request_id": request_id, "sequence": sequence},
-                        )
-                        response = future.result(timeout=2.0)
-                    assert cancel == {"status": "cancel_ack", "matched": True}
-                    assert response["status"] == "cancelled"
-                    assert response["phase"] == phase
-                    return {"phase": phase}
-
-                check(f"cancel_{target_phase}", cancellation_case)
-
-            def stale_case() -> dict[str, Any]:
-                request_id = str(uuid.uuid4())
-                old = {
-                    "action": "lookup",
-                    "request_id": request_id,
-                    "sequence": 50,
-                    "query": "old-query",
-                    "test_delays_ms": {"sdcv_running": 250},
-                }
-                new = {
-                    "action": "relookup",
-                    "request_id": request_id,
-                    "sequence": 51,
-                    "query": "new-query",
-                }
-                tracker = ActiveSequenceTracker()
-                tracker.activate(51)
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    old_future = executor.submit(request, path, old)
-                    wait_for_phase(path, request_id, 50, "sdcv_running")
-                    new_response = request(path, new)
-                    assert tracker.apply(new_response)
-                    old_response = old_future.result(timeout=2.0)
-                assert not tracker.apply(old_response)
-                assert tracker.value is not None and tracker.value["query"] == "new-query"
-                return {"active_sequence": tracker.active_sequence}
-
-            check("late_old_sequence_rejected", stale_case)
-
-            def privacy_case() -> dict[str, Any]:
-                needles = [b"cold-query", b"warm-query", b"parallel-", b"same-memory-query", b"cancel-query"]
-                cmdline = pathlib.Path(f"/proc/{service.pid}/cmdline").read_bytes()
-                environ = pathlib.Path(f"/proc/{service.pid}/environ").read_bytes()
-                assert all(needle not in cmdline for needle in needles)
-                assert all(needle not in environ for needle in needles)
-                return {"cmdline_bytes": len(cmdline), "environment_bytes": len(environ)}
-
-            check("query_only_in_framed_payload", privacy_case)
-        finally:
-            stop_service(service, path, stdout_handle, stderr_handle)
-
-        def restart_case() -> dict[str, Any]:
-            restarted, out, err = start_service(base, evidence_dir, "restart")
-            try:
-                response = request(
-                    path,
-                    {
-                        "action": "lookup",
-                        "request_id": str(uuid.uuid4()),
-                        "sequence": 60,
-                        "query": "restart-query",
-                    },
+                check("production_fixed_path_permissions_live_owner", permissions_and_live_owner)
+                check(
+                    "cancel_sdcv_running_production_full_stack",
+                    lambda: run_process_cancellation_case(stack, "sdcv_running"),
                 )
-                assert response["status"] == "ok"
-                return {"restarted_pid": restarted.pid}
+                check(
+                    "cancel_tokenizer_running_production_full_stack",
+                    lambda: run_process_cancellation_case(stack, "tokenizer_running"),
+                )
+                check(
+                    "cancel_response_queued_production_full_stack",
+                    lambda: run_response_queue_case(stack),
+                )
+                check("cancel_after_commit_is_unmatched", lambda: run_post_commit_case(stack))
+
+                def five_parallel() -> dict[str, Any]:
+                    os.environ["GATE_SDCV_MODE"] = "hit"
+                    envelopes = [stack.envelope(400 + index, f"並行查詢{index}") for index in range(5)]
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                        responses = list(executor.map(stack.request, envelopes))
+                    expected = {(item["request_id"], item["sequence"]) for item in envelopes}
+                    actual = {(item["request_id"], item["sequence"]) for item in responses}
+                    assert actual == expected
+                    assert_registry_empty(stack)
+                    return {"parallel_requests": 5, "active_registry_empty": True}
+
+                check("five_parallel_production_requests", five_parallel)
             finally:
-                stop_service(restarted, path, out, err)
+                stack.stop()
 
-        check("service_restart", restart_case)
+            def restart_and_stale_recovery() -> dict[str, Any]:
+                assert not stack.path.exists()
+                stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                stale.bind(str(stack.path))
+                stale_identity = stack.path.lstat().st_ino
+                stale.close()
+                stack.start(idle_timeout=1.0)
+                try:
+                    os.environ["GATE_SDCV_MODE"] = "hit"
+                    response = stack.request(stack.envelope(500, "重啟查詢"))
+                    assert response["sequence"] == 500
+                    assert stack.path.lstat().st_ino != stale_identity
+                    return {"stale_socket_recovered": True, "restart_request": True}
+                finally:
+                    stack.stop()
 
-        def stale_socket_case() -> dict[str, Any]:
-            runtime_root(base).mkdir(mode=0o700, exist_ok=True)
-            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            stale.bind(str(path))
-            stale.close()
-            assert path.is_socket()
-            recovered, out, err = start_service(base, evidence_dir, "stale-recovery")
-            try:
-                response = request(path, {"action": "status"})
-                assert response["status"] == "ok"
-                return {"recovered_pid": recovered.pid}
-            finally:
-                stop_service(recovered, path, out, err)
-
-        check("stale_socket_recovery", stale_socket_case)
-
-        def peer_rejection_case() -> dict[str, Any]:
-            rejecting, out, err = start_service(
-                base,
-                evidence_dir,
-                "peer-rejection",
-                idle_timeout=0.15,
-                expected_uid=os.getuid() + 1,
-            )
-            try:
-                response = request(path, {"action": "status"})
-                assert response == {"error": {"code": "peer_uid_mismatch"}}
-                return {"rejected_uid": os.getuid()}
-            finally:
-                stop_service(rejecting, path, out, err)
-
-        check("peer_uid_rejection", peer_rejection_case)
-
-        def idle_case() -> dict[str, Any]:
-            idle_service, out, err = start_service(
-                base, evidence_dir, "idle", idle_timeout=0.05
-            )
-            try:
-                envelope = {
-                    "action": "lookup",
-                    "request_id": str(uuid.uuid4()),
-                    "sequence": 70,
-                    "query": "idle-query",
-                    "test_delays_ms": {"sdcv_running": 200},
-                }
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(request, path, envelope)
-                    time.sleep(0.10)
-                    assert idle_service.poll() is None
-                    response = future.result(timeout=2.0)
-                assert response["status"] == "ok"
-                idle_service.wait(timeout=1.0)
-                assert not path.exists()
-                return {"idle_exit_code": idle_service.returncode}
-            finally:
-                if idle_service.poll() is None:
-                    idle_service.kill()
-                    idle_service.wait(timeout=1.0)
-                out.close()
-                err.close()
-
-        check("idle_cleanup_preserves_inflight_request", idle_case)
+            check("production_restart_and_stale_socket_recovery", restart_and_stale_recovery)
 
     failed = [case["name"] for case in cases if case["status"] != "pass"]
     fixed_passed = not failed
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "privacy_transport_architecture_gate",
+        "implementation_under_test": {
+            "server": "lib.dank_lookup_runtime.PrivateBackendServer",
+            "handler": "bin/dank-lookup::_backend_handler",
+            "lookup": "lib.dank_lookup_core.lookup",
+            "external_fixtures_only": ["sdcv", "tokenizer"],
+        },
+        "cancellation_contract": "cancel_before_response_commit_wins; cancel_after_commit_is_unmatched",
         "fixed_socket": {
             "path_contract": "$XDG_RUNTIME_DIR/dank-lookup/backend.sock",
             "verdict": "pass" if fixed_passed else "fail",
@@ -639,49 +593,44 @@ def run_gate(args: argparse.Namespace) -> int:
             "cases": cases,
         },
         "per_request_socket": {
-            "verdict": "not_run_no_fixed_socket_counterevidence" if fixed_passed else "pending",
-            "known_costs": [
-                "bind/startup race per request",
-                "more stale socket cleanup",
-                "separate cancel routing",
-                "greater helper/QML coordination surface",
-            ],
+            "verdict": "not_run_no_fixed_socket_counterevidence" if fixed_passed else "pending"
         },
         "decision": "fixed_private_user_service_socket" if fixed_passed else "blocked",
-        "decision_rule": "fixed socket unless reproducible unfixable lifecycle/privacy/cancellation/stale failure",
+        "decision_rule": "production full-stack lifecycle and cancellation cases must all pass",
     }
-    report_path = evidence_dir / "report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    decision_path = evidence_dir / "decision.md"
-    decision_path.write_text(
-        "# Privacy transport architecture decision\n\n"
-        f"- Fixed socket verdict: {'PASS' if fixed_passed else 'FAIL'}\n"
-        f"- Selected candidate: {report['decision']}\n"
-        "- Fixed path: `$XDG_RUNTIME_DIR/dank-lookup/backend.sock`\n"
-        "- Per-request socket: not selected without fixed-socket counterevidence.\n"
-        f"- Failed fixed-socket cases: {', '.join(failed) if failed else 'none'}\n",
+    (evidence_dir / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(report_path)
-    for case in cases:
+    (evidence_dir / "decision.md").write_text(
+        "# Privacy transport architecture decision\n\n"
+        f"- Production fixed socket verdict: {'PASS' if fixed_passed else 'FAIL'}\n"
+        f"- Selected candidate: {report['decision']}\n"
+        "- Cancellation: real server + production handler/lookup + external fake processes.\n"
+        f"- Failed cases: {', '.join(failed) if failed else 'none'}\n",
+        encoding="utf-8",
+    )
+    return report
+
+
+def run_gate(args: argparse.Namespace) -> int:
+    timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    evidence_dir = args.evidence_dir or (
+        ROOT / "tests/evidence/socket-architecture" / f"gate-{timestamp}"
+    )
+    report = execute_gate(evidence_dir)
+    print(evidence_dir / "report.json")
+    for case in report["fixed_socket"]["cases"]:
         print(f"{case['name']}: {case['status']}")
-    print(f"SOCKET_ARCHITECTURE_GATE: {'PASS fixed' if fixed_passed else 'FAIL'}")
-    return 0 if fixed_passed else 1
+    passed = report["fixed_socket"]["verdict"] == "pass"
+    print(f"SOCKET_ARCHITECTURE_GATE: {'PASS fixed production' if passed else 'FAIL'}")
+    return 0 if passed else 1
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--serve", action="store_true")
-    parser.add_argument("--runtime-base", type=pathlib.Path)
-    parser.add_argument("--idle-timeout", type=float, default=5.0)
-    parser.add_argument("--expected-uid", type=int, default=os.getuid())
     parser.add_argument("--evidence-dir", type=pathlib.Path)
-    args = parser.parse_args(argv)
-    if args.serve:
-        if args.runtime_base is None:
-            parser.error("--serve requires --runtime-base")
-        return FixedSocketService(args.runtime_base, args.idle_timeout, args.expected_uid).serve()
-    return run_gate(args)
+    return run_gate(parser.parse_args(argv))
 
 
 if __name__ == "__main__":
