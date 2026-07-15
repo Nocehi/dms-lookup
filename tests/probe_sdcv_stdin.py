@@ -31,14 +31,16 @@ FIXTURE_ROOT = ROOT / "tests/fixtures-sdcv-stdin"
 sys.path.insert(0, str(ROOT / "lib"))
 
 from dank_lookup_sdcv_stdin import (  # noqa: E402
+    DEFAULT_STDOUT_CAP_BYTES as PRODUCTION_STDOUT_CAP_BYTES,
+    STDERR_CAP_BYTES as PRODUCTION_STDERR_CAP_BYTES,
     SdcvProtocolError as ProductionProtocolError,
     parse_empty_eof as production_parse_empty_eof,
     parse_protocol_stdout as production_parse_protocol_stdout,
     protocol_argv as production_protocol_argv,
     run_bounded_protocol as production_run_bounded_protocol,
 )
-DEFAULT_CAP_BYTES = 64 * 1024 * 1024
-STDERR_CAP_BYTES = 1024 * 1024
+DEFAULT_CAP_BYTES = PRODUCTION_STDOUT_CAP_BYTES
+STDERR_CAP_BYTES = PRODUCTION_STDERR_CAP_BYTES
 MAIN_PROMPT = b"Enter word or phrase: "
 CHOICE_PROMPT = b"Your choice[-1 to abort]: "
 GIANT_UNDER_BYTES = 32 * 1024 * 1024
@@ -288,8 +290,11 @@ def run_bounded_protocol(
     timeout_seconds: float = 5.0,
     cancel_after_seconds: float | None = None,
     stdout_cap_bytes: int = DEFAULT_CAP_BYTES,
+    stderr_cap_bytes: int = STDERR_CAP_BYTES,
     inspect_query_cmdline: bool = False,
 ) -> tuple[dict[str, Any], bytes]:
+    stdout_cap_bytes = max(1, int(stdout_cap_bytes))
+    stderr_cap_bytes = max(1, int(stderr_cap_bytes))
     stdout_name = f"{name}.stdout.bin"
     stderr_name = f"{name}.stderr.bin"
     cmdline_name = f"{name}.cmdline.bin"
@@ -352,13 +357,18 @@ def run_bounded_protocol(
 
     def kill(reason: str) -> None:
         nonlocal killed, termination_reason
-        if killed or process.poll() is not None:
+        if killed:
             return
         killed = True
         termination_reason = reason
         decisions.append(reason)
         close_stdin()
         _kill_process_group(process)
+        for selector_key in list(selector.get_map().values()):
+            try:
+                selector.unregister(selector_key.fileobj)
+            except (KeyError, ValueError):
+                pass
 
     with (evidence_dir / stdout_name).open("wb") as stdout_handle, (
         evidence_dir / stderr_name
@@ -371,8 +381,13 @@ def run_bounded_protocol(
                 kill("timeout")
             events = selector.select(0.01)
             for key, _mask in events:
+                if killed:
+                    break
+                observed = stdout_observed if key.data == "stdout" else stderr_observed
+                cap_bytes = stdout_cap_bytes if key.data == "stdout" else stderr_cap_bytes
+                read_size = min(64 * 1024, max(1, cap_bytes - observed + 1))
                 try:
-                    chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                    chunk = os.read(key.fileobj.fileno(), read_size)
                 except BlockingIOError:
                     continue
                 if not chunk:
@@ -406,10 +421,12 @@ def run_bounded_protocol(
                         kill("stdout_cap")
                 else:
                     stderr_observed += len(chunk)
-                    remaining = max(0, STDERR_CAP_BYTES - len(stderr_buffer))
+                    remaining = max(0, stderr_cap_bytes - len(stderr_buffer))
                     stored = chunk[:remaining]
                     stderr_buffer.extend(stored)
                     stderr_handle.write(stored)
+                    if stderr_observed > stderr_cap_bytes:
+                        kill("stderr_cap")
             if main_prompts >= 1 and not query_sent:
                 if query is None:
                     if close_on_initial_prompt:
@@ -450,7 +467,9 @@ def run_bounded_protocol(
         "stdout_bytes": stdout_observed,
         "stdout_stored_bytes": len(stdout_buffer),
         "stderr_bytes": stderr_observed,
+        "stderr_stored_bytes": len(stderr_buffer),
         "stdout_cap_bytes": stdout_cap_bytes,
+        "stderr_cap_bytes": stderr_cap_bytes,
         "stdout_file": stdout_name,
         "stderr_file": stderr_name,
         "cmdline_file": cmdline_name if inspect_query_cmdline else None,
@@ -897,6 +916,41 @@ def gate(args: argparse.Namespace) -> int:
         over_result["status"] = "pass" if not over_errors else "fail"
         cases.append(over_result)
 
+        stderr_producer = temp / "sustained-stderr.py"
+        stderr_producer.write_text(
+            "import os\n"
+            "chunk = b'x' * (64 * 1024)\n"
+            "while True:\n"
+            "    os.write(2, chunk)\n",
+            encoding="utf-8",
+        )
+        stderr_result, _stdout = production_run_bounded_protocol(
+            name="stderr_over_cap",
+            argv=[sys.executable, str(stderr_producer)],
+            environment=environment,
+            evidence_dir=evidence_dir,
+            query=None,
+            timeout_seconds=2.0,
+            stdout_cap_bytes=DEFAULT_CAP_BYTES,
+            stderr_cap_bytes=STDERR_CAP_BYTES,
+        )
+        stderr_errors = []
+        if stderr_result["termination_reason"] != "stderr_cap":
+            stderr_errors.append("over-cap stderr was not terminated at the stderr cap")
+        if stderr_result["stderr_stored_bytes"] != STDERR_CAP_BYTES:
+            stderr_errors.append("stored stderr evidence did not stop at exactly the cap")
+        if not (
+            STDERR_CAP_BYTES
+            < stderr_result["stderr_bytes"]
+            <= STDERR_CAP_BYTES + 1
+        ):
+            stderr_errors.append("observed stderr bytes did not stop at cap plus sentinel")
+        if not stderr_result["process_group_reaped"]:
+            stderr_errors.append("stderr-capped process group was not reaped")
+        stderr_result["errors"] = stderr_errors
+        stderr_result["status"] = "pass" if not stderr_errors else "fail"
+        cases.append(stderr_result)
+
         sentinel = "cmdline-" + secrets.token_hex(24)
         sentinel_result, _parsed = record_completed(
             name="sentinel_cmdline",
@@ -937,11 +991,12 @@ def gate(args: argparse.Namespace) -> int:
     if failed_cases:
         gate_errors.append("failed cases: " + ", ".join(failed_cases))
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "sdcv_0_5_5_stdin_feasibility_gate",
         "verdict": "pass" if not gate_errors else "fail",
         "sdcv_version": version.stdout.strip(),
         "stdout_cap_bytes": DEFAULT_CAP_BYTES,
+        "stderr_cap_bytes": STDERR_CAP_BYTES,
         "history_environment": {"SDCV_HISTFILE": "/dev/null", "SDCV_HISTSIZE": "0"},
         "history_paths": history_paths,
         "gate_errors": gate_errors,
@@ -953,7 +1008,8 @@ def gate(args: argparse.Namespace) -> int:
     for case in cases:
         print(
             f"{case['name']}: {case['status']} rc={case['returncode']} "
-            f"termination={case['termination_reason']} stdout={case['stdout_bytes']}"
+            f"termination={case['termination_reason']} stdout={case['stdout_bytes']} "
+            f"stderr={case['stderr_bytes']}"
         )
     print(f"SDCV_STDIN_GATE: {report['verdict'].upper()}")
     return 0 if report["verdict"] == "pass" else 1

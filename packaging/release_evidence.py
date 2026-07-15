@@ -21,6 +21,8 @@ AUDIT_HANDOFF_NAME = "AUDIT-RELEASE-BLOCKERS-使用者看過並表示認可.md"
 EVIDENCE_PREFIX = pathlib.PurePosixPath("tests/evidence")
 CONTEXT_SCHEMA_VERSION = 1
 BINDING_SCHEMA_VERSION = 1
+SOURCE_MANIFEST_SCHEMA_VERSION = 2
+SOURCE_MANIFEST_ALGORITHM = "sha256-regular-path-mode-size-and-bytes-v2"
 _CACHE_PARTS = frozenset(
     {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache"}
 )
@@ -143,9 +145,25 @@ def source_candidate_paths(
             info = path.lstat()
         except FileNotFoundError:
             continue
-        if stat.S_ISREG(info.st_mode):
-            selected.append(relative)
+        _validated_source_mode(relative, info)
+        selected.append(relative)
     return sorted(set(selected), key=lambda item: item.as_posix())
+
+
+def _validated_source_mode(
+    relative: pathlib.PurePosixPath,
+    info: os.stat_result,
+) -> int:
+    if not stat.S_ISREG(info.st_mode):
+        raise ReleaseEvidenceError(
+            f"source candidate is not a regular file: {relative.as_posix()}"
+        )
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & (stat.S_ISUID | stat.S_ISGID):
+        raise ReleaseEvidenceError(
+            f"source candidate has setuid or setgid bits: {relative.as_posix()}"
+        )
+    return mode
 
 
 def sha256_file(path: pathlib.Path) -> str:
@@ -162,30 +180,57 @@ def canonical_source_manifest(
 ) -> dict[str, object]:
     paths = source_candidate_paths(root, candidates)
     overall = hashlib.sha256()
+    overall.update(b"dank-lookup-source-manifest\0")
+    overall.update(SOURCE_MANIFEST_ALGORITHM.encode("ascii"))
+    overall.update(b"\0")
     entries: list[dict[str, object]] = []
     for relative in paths:
         encoded_path = relative.as_posix().encode("utf-8")
         source = root / relative.as_posix()
-        size = source.stat().st_size
-        file_digest = hashlib.sha256()
-        overall.update(b"file\0")
-        overall.update(len(encoded_path).to_bytes(8, "big"))
-        overall.update(encoded_path)
-        overall.update(size.to_bytes(16, "big"))
-        with source.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                file_digest.update(chunk)
-                overall.update(chunk)
-        overall.update(b"\0end\0")
+        before = source.lstat()
+        _validated_source_mode(relative, before)
+        try:
+            descriptor = os.open(
+                source,
+                os.O_RDONLY | os.O_NOFOLLOW,
+            )
+        except OSError as exc:
+            raise ReleaseEvidenceError(
+                f"could not open regular source candidate: {relative.as_posix()}"
+            ) from exc
+        try:
+            opened = os.fstat(descriptor)
+            mode = _validated_source_mode(relative, opened)
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise ReleaseEvidenceError(
+                    f"source candidate changed while opening: {relative.as_posix()}"
+                )
+            size = opened.st_size
+            file_digest = hashlib.sha256()
+            overall.update(b"regular\0")
+            overall.update(len(encoded_path).to_bytes(8, "big"))
+            overall.update(encoded_path)
+            overall.update(mode.to_bytes(4, "big"))
+            overall.update(size.to_bytes(16, "big"))
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                while chunk := handle.read(1024 * 1024):
+                    file_digest.update(chunk)
+                    overall.update(chunk)
+            overall.update(b"\0end\0")
+        finally:
+            os.close(descriptor)
         entries.append(
             {
                 "path": relative.as_posix(),
+                "type": "regular",
+                "mode": mode,
                 "size": size,
                 "sha256": file_digest.hexdigest(),
             }
         )
     return {
-        "algorithm": "sha256-paths-and-bytes-v1",
+        "schema_version": SOURCE_MANIFEST_SCHEMA_VERSION,
+        "algorithm": SOURCE_MANIFEST_ALGORITHM,
         "digest": overall.hexdigest(),
         "files": entries,
     }
@@ -222,8 +267,8 @@ def _validate_session(value: object) -> str:
 def _binding_identity(value: Mapping[str, object]) -> tuple[str, str]:
     session_id = _validate_session(value.get("release_session_id"))
     source_manifest = value.get("source_manifest")
-    if not isinstance(source_manifest, dict):
-        raise ReleaseEvidenceError("release source manifest is invalid")
+    _validate_source_manifest(source_manifest)
+    assert isinstance(source_manifest, Mapping)
     source_digest = source_manifest.get("digest")
     if (
         not isinstance(source_digest, str)
@@ -232,6 +277,16 @@ def _binding_identity(value: Mapping[str, object]) -> tuple[str, str]:
     ):
         raise ReleaseEvidenceError("release source digest is invalid")
     return session_id, source_digest
+
+
+def _validate_source_manifest(value: object) -> None:
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version") != SOURCE_MANIFEST_SCHEMA_VERSION
+        or value.get("algorithm") != SOURCE_MANIFEST_ALGORITHM
+        or not isinstance(value.get("files"), list)
+    ):
+        raise ReleaseEvidenceError("unsupported release source manifest")
 
 
 def create_context(root: pathlib.Path, context_path: pathlib.Path) -> dict[str, object]:
@@ -487,6 +542,7 @@ def verify_staged_source(
     staging: pathlib.Path,
     source_manifest: Mapping[str, object],
 ) -> None:
+    _validate_source_manifest(source_manifest)
     files = source_manifest.get("files")
     if not isinstance(files, list) or not all(isinstance(item, dict) for item in files):
         raise ReleaseEvidenceError("source manifest file list is invalid")

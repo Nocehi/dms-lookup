@@ -33,10 +33,12 @@ from dank_lookup_core import (  # noqa: E402
     source_exact_only,
 )
 from dank_lookup_sdcv_stdin import (  # noqa: E402
+    STDERR_CAP_BYTES,
     SdcvProtocolError,
     parse_empty_eof,
     parse_protocol_stdout,
     protocol_argv,
+    run_bounded_protocol,
 )
 
 
@@ -441,7 +443,96 @@ class ProductionTimeoutBoundaryTests(unittest.TestCase):
         self.assertAlmostEqual(observed_timeout[0], 0.1)
 
 
+class SdcvBoundedProtocolTests(unittest.TestCase):
+    def test_sustained_stderr_cap_kills_and_reaps_process_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            parent_pid_file = root / "parent.pid"
+            child_pid_file = root / "child.pid"
+            producer = root / "stderr-producer"
+            producer.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/python3
+                    import os
+                    import pathlib
+                    import time
+
+                    pathlib.Path(os.environ["PARENT_PID_FILE"]).write_text(
+                        str(os.getpid()), encoding="ascii"
+                    )
+                    child = os.fork()
+                    if child == 0:
+                        pathlib.Path(os.environ["CHILD_PID_FILE"]).write_text(
+                            str(os.getpid()), encoding="ascii"
+                        )
+                        chunk = b"x" * (64 * 1024)
+                        while True:
+                            os.write(2, chunk)
+                    while True:
+                        time.sleep(1)
+                    """
+                ),
+                encoding="utf-8",
+            )
+            producer.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PARENT_PID_FILE": str(parent_pid_file),
+                    "CHILD_PID_FILE": str(child_pid_file),
+                }
+            )
+
+            run, _stdout = run_bounded_protocol(
+                name="sustained-stderr",
+                argv=[str(producer)],
+                environment=environment,
+                query="word",
+                timeout_seconds=0.25,
+            )
+
+            self.assertEqual(run["termination_reason"], "stderr_cap")
+            self.assertEqual(run["stderr_stored_bytes"], STDERR_CAP_BYTES)
+            self.assertGreater(run["stderr_bytes"], STDERR_CAP_BYTES)
+            self.assertLessEqual(run["stderr_bytes"], STDERR_CAP_BYTES + 1)
+            self.assertTrue(run["process_group_reaped"])
+            for pid_file in (parent_pid_file, child_pid_file):
+                pid = int(pid_file.read_text(encoding="ascii"))
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+
+
 class StdinAdapterTests(unittest.TestCase):
+    def test_stderr_cap_is_reported_distinctly_and_stops_followup_queries(self):
+        calls = []
+
+        def protocol_runner(**kwargs):
+            calls.append(kwargs)
+            return (
+                {
+                    "returncode": -9,
+                    "termination_reason": "stderr_cap",
+                    "stdout_bytes": 0,
+                    "stderr_bytes": STDERR_CAP_BYTES + 1,
+                    "choice_prompt_count": 0,
+                    "process_group_reaped": True,
+                },
+                b"",
+            )
+
+        client = SdcvClient(
+            executable="/bin/true",
+            protocol_runner=protocol_runner,
+        )
+        entries, warning = client.query(
+            {"name": "FixtureDict", "allow_related": False},
+            "word",
+        )
+        self.assertEqual(entries, [])
+        self.assertEqual(warning, "sdcv_stderr_cap")
+        self.assertEqual(len(calls), 1)
+
     def test_sdcv_query_is_a_protocol_payload_not_an_argv_or_environment_value(self):
         calls = []
 

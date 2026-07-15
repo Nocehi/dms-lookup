@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dank-lookup.invalid/schemas/sdcv-stdin-gate-v1.json",
+  "$id": "https://dank-lookup.invalid/schemas/sdcv-stdin-gate-v2.json",
   "title": "dank-lookup sdcv 0.5.5 stdin feasibility evidence",
   "type": "object",
   "additionalProperties": false,
@@ -10,17 +10,19 @@
     "verdict",
     "sdcv_version",
     "stdout_cap_bytes",
+    "stderr_cap_bytes",
     "history_environment",
     "history_paths",
     "gate_errors",
     "cases"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "kind": {"const": "sdcv_0_5_5_stdin_feasibility_gate"},
     "verdict": {"enum": ["pass", "fail"]},
     "sdcv_version": {"type": "string"},
     "stdout_cap_bytes": {"type": "integer", "minimum": 1},
+    "stderr_cap_bytes": {"type": "integer", "minimum": 1},
     "history_environment": {
       "type": "object",
       "additionalProperties": false,
@@ -34,7 +36,7 @@
     "gate_errors": {"type": "array", "items": {"type": "string"}},
     "cases": {
       "type": "array",
-      "minItems": 17,
+      "minItems": 18,
       "items": {"$ref": "#/$defs/case"}
     }
   },
@@ -52,7 +54,9 @@
         "stdout_bytes",
         "stdout_stored_bytes",
         "stderr_bytes",
+        "stderr_stored_bytes",
         "stdout_cap_bytes",
+        "stderr_cap_bytes",
         "stdout_file",
         "stderr_file",
         "process_group_reaped",
@@ -69,12 +73,14 @@
         "returncode": {"type": ["integer", "null"]},
         "duration_ms": {"type": "number", "minimum": 0},
         "termination_reason": {
-          "enum": [null, "timeout", "cancelled", "stdout_cap", "wait_timeout"]
+          "enum": [null, "timeout", "cancelled", "stdout_cap", "stderr_cap", "wait_timeout"]
         },
         "stdout_bytes": {"type": "integer", "minimum": 0},
         "stdout_stored_bytes": {"type": "integer", "minimum": 0},
         "stderr_bytes": {"type": "integer", "minimum": 0},
+        "stderr_stored_bytes": {"type": "integer", "minimum": 0},
         "stdout_cap_bytes": {"type": "integer", "minimum": 1},
+        "stderr_cap_bytes": {"type": "integer", "minimum": 1},
         "stdout_file": {"type": "string", "minLength": 1},
         "stderr_file": {"type": "string", "minLength": 1},
         "cmdline_file": {"type": ["string", "null"]},

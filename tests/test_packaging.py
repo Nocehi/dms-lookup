@@ -6,6 +6,8 @@ import io
 import json
 import os
 import pathlib
+import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -56,6 +58,228 @@ class ManagedManifestUnitTests(unittest.TestCase):
 
 
 class ReviewBundleUnitTests(unittest.TestCase):
+    def _release_fixture(
+        self,
+        base: pathlib.Path,
+        *,
+        record_privacy: bool = True,
+        external_requirements: bool = False,
+        source_mode: int = 0o644,
+    ) -> dict[str, pathlib.Path | dict]:
+        root = base / "repo"
+        root.mkdir()
+        requirements = (
+            base / "requirements.json"
+            if external_requirements
+            else root / "requirements.json"
+        )
+        requirements.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "required_groups": {
+                        "unit_logs": ["tests/evidence/release/unit/*.log"],
+                        "privacy_logs": ["tests/evidence/release/privacy/*.log"],
+                        "release_binding": [
+                            "tests/evidence/release/binding/*.json"
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        readme = root / "README.md"
+        readme.write_text("tracked source\n", encoding="utf-8")
+        readme.chmod(source_mode)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        tracked = ["README.md"]
+        if not external_requirements:
+            tracked.append("requirements.json")
+        subprocess.run(["git", "add", *tracked], cwd=root, check=True)
+
+        context_path = base / "release-context.json"
+        context = release_evidence.create_context(root, context_path)
+        unit = root / "tests/evidence/release/unit/unit.log"
+        privacy = root / "tests/evidence/release/privacy/privacy.log"
+        unit.parent.mkdir(parents=True)
+        privacy.parent.mkdir(parents=True)
+        unit.write_text("UNIT: PASS\n", encoding="utf-8")
+        if record_privacy:
+            privacy.write_text("PRIVACY_TRANSPORT: PASS\n", encoding="utf-8")
+        recorded = [unit, privacy] if record_privacy else [unit]
+        release_evidence.record_evidence(root, context_path, recorded)
+        binding = (
+            root
+            / "tests/evidence/release/binding"
+            / f"{context['release_session_id']}.json"
+        )
+        if record_privacy:
+            release_evidence.finalize_binding(
+                root,
+                context_path,
+                requirements,
+                binding,
+            )
+        return {
+            "root": root,
+            "requirements": requirements,
+            "readme": readme,
+            "context_path": context_path,
+            "context": context,
+            "unit": unit,
+            "privacy": privacy,
+            "binding": binding,
+        }
+
+    @staticmethod
+    def _snapshot(paths: list[pathlib.Path]) -> dict[pathlib.Path, bytes]:
+        return {path: path.read_bytes() for path in paths}
+
+    def test_bundle_rejects_repository_input_outputs_before_temporary_creation(self):
+        for target_name in ("readme", "binding", "unit"):
+            with self.subTest(target=target_name), tempfile.TemporaryDirectory() as directory:
+                fixture = self._release_fixture(pathlib.Path(directory))
+                root = fixture["root"]
+                requirements = fixture["requirements"]
+                binding = fixture["binding"]
+                target = fixture[target_name]
+                assert isinstance(root, pathlib.Path)
+                assert isinstance(requirements, pathlib.Path)
+                assert isinstance(binding, pathlib.Path)
+                assert isinstance(target, pathlib.Path)
+                inputs = [
+                    fixture["readme"],
+                    requirements,
+                    fixture["context_path"],
+                    fixture["unit"],
+                    fixture["privacy"],
+                    binding,
+                ]
+                assert all(isinstance(path, pathlib.Path) for path in inputs)
+                before = self._snapshot(inputs)
+                real_temporary_directory = tempfile.TemporaryDirectory
+                with (
+                    mock.patch.object(
+                        review_bundle.tempfile,
+                        "TemporaryDirectory",
+                        wraps=real_temporary_directory,
+                    ) as temporary_directory,
+                    mock.patch.object(
+                        review_bundle,
+                        "validate_evidence_content",
+                        return_value=None,
+                    ),
+                    self.assertRaisesRegex(
+                        review_bundle.BundleError,
+                        "outside repository|overlaps protected input",
+                    ),
+                ):
+                    review_bundle.build_bundle(
+                        root,
+                        target,
+                        requirements,
+                        binding,
+                        b"dank-lookup-privacy-" + (b"c" * 64),
+                    )
+                temporary_directory.assert_not_called()
+                self.assertEqual(self._snapshot(inputs), before)
+                self.assertFalse(target.read_bytes().startswith(b"\x1f\x8b"))
+
+    def test_bundle_rejects_external_requirements_output_before_temporary_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = self._release_fixture(
+                pathlib.Path(directory), external_requirements=True
+            )
+            root = fixture["root"]
+            requirements = fixture["requirements"]
+            binding = fixture["binding"]
+            assert isinstance(root, pathlib.Path)
+            assert isinstance(requirements, pathlib.Path)
+            assert isinstance(binding, pathlib.Path)
+            inputs = [
+                fixture["readme"],
+                requirements,
+                fixture["context_path"],
+                fixture["unit"],
+                fixture["privacy"],
+                binding,
+            ]
+            assert all(isinstance(path, pathlib.Path) for path in inputs)
+            before = self._snapshot(inputs)
+            real_temporary_directory = tempfile.TemporaryDirectory
+            with (
+                mock.patch.object(
+                    review_bundle.tempfile,
+                    "TemporaryDirectory",
+                    wraps=real_temporary_directory,
+                ) as temporary_directory,
+                mock.patch.object(
+                    review_bundle,
+                    "validate_evidence_content",
+                    return_value=None,
+                ),
+                self.assertRaisesRegex(
+                    review_bundle.BundleError,
+                    "overlaps protected input",
+                ),
+            ):
+                review_bundle.build_bundle(
+                    root,
+                    requirements,
+                    requirements,
+                    binding,
+                    b"dank-lookup-privacy-" + (b"d" * 64),
+                )
+            temporary_directory.assert_not_called()
+            self.assertEqual(self._snapshot(inputs), before)
+            self.assertFalse(requirements.read_bytes().startswith(b"\x1f\x8b"))
+
+    def test_release_orchestrator_rejects_context_output_before_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = self._release_fixture(
+                pathlib.Path(directory), record_privacy=False
+            )
+            root = fixture["root"]
+            requirements = fixture["requirements"]
+            context_path = fixture["context_path"]
+            binding = fixture["binding"]
+            privacy = fixture["privacy"]
+            assert isinstance(root, pathlib.Path)
+            assert isinstance(requirements, pathlib.Path)
+            assert isinstance(context_path, pathlib.Path)
+            assert isinstance(binding, pathlib.Path)
+            assert isinstance(privacy, pathlib.Path)
+            inputs = [
+                fixture["readme"],
+                requirements,
+                context_path,
+                fixture["unit"],
+            ]
+            assert all(isinstance(path, pathlib.Path) for path in inputs)
+            before = self._snapshot(inputs)
+            with (
+                mock.patch.object(
+                    review_bundle,
+                    "SentinelPipeDispatcher",
+                    side_effect=AssertionError("dispatcher reached before collision check"),
+                ) as dispatcher,
+                self.assertRaisesRegex(
+                    review_bundle.BundleError,
+                    "overlaps protected input",
+                ),
+            ):
+                review_bundle.orchestrate_release_bundle(
+                    root,
+                    context_path,
+                    requirements,
+                    context_path,
+                )
+            dispatcher.assert_not_called()
+            self.assertEqual(self._snapshot(inputs), before)
+            self.assertFalse(context_path.read_bytes().startswith(b"\x1f\x8b"))
+            self.assertFalse(binding.exists())
+            self.assertFalse(privacy.exists())
+
     def test_source_manifest_hashes_current_paths_and_bytes_with_release_exclusions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -97,6 +321,96 @@ class ReviewBundleUnitTests(unittest.TestCase):
                 release_evidence.canonical_source_manifest(root, candidates)["digest"],
                 first["digest"],
             )
+
+    def test_source_manifest_v2_binds_regular_type_and_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "tool"
+            source.write_bytes(b"unchanged executable bytes\n")
+            source.chmod(0o755)
+            candidates = [pathlib.PurePosixPath("tool")]
+            executable = release_evidence.canonical_source_manifest(root, candidates)
+            source.chmod(0o644)
+            non_executable = release_evidence.canonical_source_manifest(root, candidates)
+
+            self.assertEqual(
+                executable["files"][0]["sha256"],
+                non_executable["files"][0]["sha256"],
+            )
+            self.assertNotEqual(executable["digest"], non_executable["digest"])
+            self.assertEqual(executable["schema_version"], 2)
+            self.assertEqual(
+                executable["algorithm"],
+                "sha256-regular-path-mode-size-and-bytes-v2",
+            )
+            self.assertEqual(executable["files"][0]["type"], "regular")
+            self.assertEqual(executable["files"][0]["mode"], 0o755)
+            self.assertEqual(non_executable["files"][0]["mode"], 0o644)
+
+    def test_source_manifest_rejects_setid_and_nonregular_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "tool"
+            source.write_text("source\n", encoding="utf-8")
+            candidate = [pathlib.PurePosixPath("tool")]
+            for mode in (0o4755, 0o2755):
+                with self.subTest(mode=oct(mode)):
+                    source.chmod(mode)
+                    with self.assertRaisesRegex(
+                        release_evidence.ReleaseEvidenceError,
+                        "setuid|setgid",
+                    ):
+                        release_evidence.canonical_source_manifest(root, candidate)
+
+            source.unlink()
+            target = root / "target"
+            target.write_text("target\n", encoding="utf-8")
+            source.symlink_to(target)
+            with self.subTest(kind="symlink"), self.assertRaisesRegex(
+                release_evidence.ReleaseEvidenceError,
+                "regular file",
+            ):
+                release_evidence.canonical_source_manifest(root, candidate)
+
+            source.unlink()
+            source.mkdir()
+            with self.subTest(kind="directory"), self.assertRaisesRegex(
+                release_evidence.ReleaseEvidenceError,
+                "regular file",
+            ):
+                release_evidence.canonical_source_manifest(root, candidate)
+
+    def test_mode_change_invalidates_existing_context_and_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = self._release_fixture(
+                pathlib.Path(directory), source_mode=0o755
+            )
+            root = fixture["root"]
+            readme = fixture["readme"]
+            context_path = fixture["context_path"]
+            requirements = fixture["requirements"]
+            binding = fixture["binding"]
+            assert isinstance(root, pathlib.Path)
+            assert isinstance(readme, pathlib.Path)
+            assert isinstance(context_path, pathlib.Path)
+            assert isinstance(requirements, pathlib.Path)
+            assert isinstance(binding, pathlib.Path)
+            before_digest = hashlib.sha256(readme.read_bytes()).hexdigest()
+            readme.chmod(0o644)
+            self.assertEqual(
+                hashlib.sha256(readme.read_bytes()).hexdigest(), before_digest
+            )
+            context = release_evidence.load_context(context_path)
+            with self.assertRaisesRegex(
+                release_evidence.ReleaseEvidenceError,
+                "source candidates",
+            ):
+                release_evidence.verify_source_unchanged(root, context)
+            with self.assertRaisesRegex(
+                release_evidence.ReleaseEvidenceError,
+                "source digest",
+            ):
+                release_evidence.verify_binding(root, requirements, binding)
 
     def test_release_binding_rejects_changed_or_mixed_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -199,6 +513,28 @@ class ReviewBundleUnitTests(unittest.TestCase):
                 "staging source digest",
             ):
                 release_evidence.verify_staged_source(root, manifest)
+
+    def test_staging_source_mode_must_match_bound_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            source_root = base / "source"
+            staging = base / "staging"
+            source_root.mkdir()
+            staging.mkdir()
+            source = source_root / "tool"
+            source.write_bytes(b"same staged bytes\n")
+            source.chmod(0o755)
+            manifest = release_evidence.canonical_source_manifest(
+                source_root, [pathlib.PurePosixPath("tool")]
+            )
+            shutil.copy2(source, staging / "tool")
+            release_evidence.verify_staged_source(staging, manifest)
+            (staging / "tool").chmod(0o644)
+            with self.assertRaisesRegex(
+                release_evidence.ReleaseEvidenceError,
+                "staging source digest",
+            ):
+                release_evidence.verify_staged_source(staging, manifest)
 
     def test_one_orchestrator_sentinel_is_reused_only_through_anonymous_fds(self):
         child = """

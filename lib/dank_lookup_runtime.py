@@ -32,6 +32,7 @@ RUNTIME_NAME = "dank-lookup"
 MAX_AGE_SECONDS = 24 * 60 * 60
 BACKEND_SOCKET_NAME = "backend.sock"
 BACKEND_START_LOCK_NAME = "backend-start.lock"
+BACKEND_LIFECYCLE_LOCK_NAME = "backend-server.lock"
 MAX_REQUEST_FRAME_BYTES = 1024 * 1024
 MAX_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024
 MAX_TRANSPORT_QUERY_BYTES = 64 * 1024
@@ -275,6 +276,57 @@ class PrivateBackendServer:
         self._last_activity = time.monotonic()
         self._bound_socket_identity: tuple[int, int] | None = None
 
+    def _acquire_lifecycle_lock(self) -> int:
+        lock_path = runtime_dir() / BACKEND_LIFECYCLE_LOCK_NAME
+        try:
+            lock_fd = os.open(
+                lock_path,
+                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                0o600,
+            )
+        except OSError as exc:
+            raise RuntimeSecurityError(
+                "cannot open backend server lifecycle lock"
+            ) from exc
+        try:
+            info = os.fstat(lock_fd)
+            if info.st_uid != os.getuid() or not stat.S_ISREG(info.st_mode):
+                raise RuntimeSecurityError(
+                    "backend server lifecycle lock is not an owned regular file"
+                )
+            os.fchmod(lock_fd, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeSecurityError(
+                    "backend server lifecycle is already running and owned"
+                ) from exc
+            try:
+                current = lock_path.lstat()
+            except OSError as exc:
+                raise RuntimeSecurityError(
+                    "backend server lifecycle lock pathname changed"
+                ) from exc
+            if (
+                current.st_uid != os.getuid()
+                or not stat.S_ISREG(current.st_mode)
+                or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise RuntimeSecurityError(
+                    "backend server lifecycle lock pathname changed"
+                )
+            return lock_fd
+        except BaseException:
+            os.close(lock_fd)
+            raise
+
+    @staticmethod
+    def _release_lifecycle_lock(lock_fd: int) -> None:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
     def _prepare_socket_path(self) -> None:
         root = runtime_dir()
         if self.path.parent.resolve(strict=True) != root.resolve(strict=True):
@@ -401,60 +453,64 @@ class PrivateBackendServer:
                 self._last_activity = time.monotonic()
 
     def serve(self) -> int:
-        self._prepare_socket_path()
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        lifecycle_lock_fd = self._acquire_lifecycle_lock()
         try:
-            server.bind(str(self.path))
-            bound_info = self.path.lstat()
-            if bound_info.st_uid != os.getuid() or not stat.S_ISSOCK(bound_info.st_mode):
-                raise RuntimeSecurityError("bound backend path is not an owned socket")
-            self._bound_socket_identity = (bound_info.st_dev, bound_info.st_ino)
-            self.path.chmod(0o600)
-            current_info = self.path.lstat()
-            if (current_info.st_dev, current_info.st_ino) != self._bound_socket_identity:
-                raise RuntimeSecurityError("backend socket changed during bind")
-            server.listen(32)
-            server.settimeout(0.05)
-            while not self._stop.is_set():
-                try:
-                    connection, _address = server.accept()
-                except socket.timeout:
-                    with self._lock:
-                        idle = not self._active and (
-                            time.monotonic() - self._last_activity >= self.idle_timeout
-                        )
-                    if idle:
-                        break
-                    continue
-                with self._lock:
-                    self._last_activity = time.monotonic()
-                worker = threading.Thread(
-                    target=self._serve_connection,
-                    args=(connection,),
-                    daemon=True,
-                )
-                with self._lock:
-                    self._workers.add(worker)
-                worker.start()
-        finally:
-            server.close()
-            with self._lock:
-                workers = list(self._workers)
-            for worker in workers:
-                worker.join(timeout=2.0)
+            self._prepare_socket_path()
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-                info = self.path.lstat()
-                if (
-                    self._bound_socket_identity is not None
-                    and info.st_uid == os.getuid()
-                    and stat.S_ISSOCK(info.st_mode)
-                    and (info.st_dev, info.st_ino) == self._bound_socket_identity
-                ):
-                    self.path.unlink()
-            except OSError:
-                pass
+                server.bind(str(self.path))
+                bound_info = self.path.lstat()
+                if bound_info.st_uid != os.getuid() or not stat.S_ISSOCK(bound_info.st_mode):
+                    raise RuntimeSecurityError("bound backend path is not an owned socket")
+                self._bound_socket_identity = (bound_info.st_dev, bound_info.st_ino)
+                self.path.chmod(0o600)
+                current_info = self.path.lstat()
+                if (current_info.st_dev, current_info.st_ino) != self._bound_socket_identity:
+                    raise RuntimeSecurityError("backend socket changed during bind")
+                server.listen(32)
+                server.settimeout(0.05)
+                while not self._stop.is_set():
+                    try:
+                        connection, _address = server.accept()
+                    except socket.timeout:
+                        with self._lock:
+                            idle = not self._active and (
+                                time.monotonic() - self._last_activity >= self.idle_timeout
+                            )
+                        if idle:
+                            break
+                        continue
+                    with self._lock:
+                        self._last_activity = time.monotonic()
+                    worker = threading.Thread(
+                        target=self._serve_connection,
+                        args=(connection,),
+                        daemon=True,
+                    )
+                    with self._lock:
+                        self._workers.add(worker)
+                    worker.start()
             finally:
-                self._bound_socket_identity = None
+                server.close()
+                with self._lock:
+                    workers = list(self._workers)
+                for worker in workers:
+                    worker.join(timeout=2.0)
+                try:
+                    info = self.path.lstat()
+                    if (
+                        self._bound_socket_identity is not None
+                        and info.st_uid == os.getuid()
+                        and stat.S_ISSOCK(info.st_mode)
+                        and (info.st_dev, info.st_ino) == self._bound_socket_identity
+                    ):
+                        self.path.unlink()
+                except OSError:
+                    pass
+                finally:
+                    self._bound_socket_identity = None
+        finally:
+            self._release_lifecycle_lock(lifecycle_lock_fd)
         return 0
 
 
@@ -716,6 +772,7 @@ def cleanup_runtime(max_age_seconds: int = MAX_AGE_SECONDS, keep: Iterable[pathl
             "server.sock",
             BACKEND_SOCKET_NAME,
             BACKEND_START_LOCK_NAME,
+            BACKEND_LIFECYCLE_LOCK_NAME,
         }:
             continue
         try:

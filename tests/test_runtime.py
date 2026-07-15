@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import pathlib
@@ -219,14 +220,38 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(destination.exists(), "cleanup helper deleted the replacement")
         self.assertEqual(destination.read_bytes(), b"new")
 
-    def test_stale_cleanup_preserves_backend_start_lock(self):
-        lock_path = runtime_dir() / "backend-start.lock"
-        atomic_write_bytes(lock_path, b"")
-        old = time.time() - 120
-        os.utime(lock_path, (old, old), follow_symlinks=False)
+    def test_stale_cleanup_preserves_start_and_lifecycle_lock_inodes(self):
+        lock_paths = [
+            runtime_dir() / "backend-start.lock",
+            runtime_dir() / "backend-server.lock",
+        ]
+        lock_fds = []
+        lock_identities = {}
+        try:
+            for lock_path in lock_paths:
+                lock_fd = os.open(
+                    lock_path,
+                    os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                    0o600,
+                )
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_fds.append(lock_fd)
+                info = lock_path.lstat()
+                lock_identities[lock_path] = (info.st_dev, info.st_ino)
+                old = time.time() - 120
+                os.utime(lock_path, (old, old), follow_symlinks=False)
 
-        self.assertEqual(cleanup_runtime(max_age_seconds=60), 0)
-        self.assertTrue(lock_path.is_file())
+            self.assertEqual(cleanup_runtime(max_age_seconds=60), 0)
+            for lock_path in lock_paths:
+                self.assertTrue(lock_path.is_file())
+                info = lock_path.lstat()
+                self.assertEqual(
+                    (info.st_dev, info.st_ino), lock_identities[lock_path]
+                )
+        finally:
+            for lock_fd in lock_fds:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
 
 
 if __name__ == "__main__":

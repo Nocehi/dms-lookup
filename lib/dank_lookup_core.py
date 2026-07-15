@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from dank_lookup_sdcv_stdin import (
     DEFAULT_STDOUT_CAP_BYTES,
+    STDERR_CAP_BYTES,
     SdcvProtocolError,
     parse_protocol_stdout,
     protocol_argv,
@@ -391,6 +392,7 @@ class SdcvClient:
         protocol_runner: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
         cancel_event: threading.Event | None = None,
         stdout_cap_bytes: int = DEFAULT_STDOUT_CAP_BYTES,
+        stderr_cap_bytes: int = STDERR_CAP_BYTES,
     ) -> None:
         self.executable = executable or os.environ.get("DANK_LOOKUP_SDCV", "sdcv")
         self.timeout = timeout
@@ -399,6 +401,7 @@ class SdcvClient:
         self.protocol_runner = protocol_runner or run_bounded_protocol
         self.cancel_event = cancel_event
         self.stdout_cap_bytes = max(1024, int(stdout_cap_bytes))
+        self.stderr_cap_bytes = max(1024, int(stderr_cap_bytes))
         self.environment = os.environ.copy()
         self.environment.update(
             {
@@ -517,6 +520,7 @@ class SdcvClient:
                 timeout_seconds=timeout,
                 cancellation_event=self.cancel_event,
                 stdout_cap_bytes=max(1, stdout_cap_bytes),
+                stderr_cap_bytes=self.stderr_cap_bytes,
             )
         except (OSError, RuntimeError, ValueError, UnicodeError):
             return None, "sdcv_execution_failed", 0
@@ -527,6 +531,8 @@ class SdcvClient:
             return None, "lookup_cancelled", int(run.get("stdout_bytes", 0))
         if termination == "stdout_cap":
             return None, "sdcv_stdout_cap", int(run.get("stdout_bytes", 0))
+        if termination == "stderr_cap":
+            return None, "sdcv_stderr_cap", int(run.get("stdout_bytes", 0))
         if termination == "timeout":
             if self.deadline_ns is not None and self.clock_ns() >= self.deadline_ns:
                 self.budget_exhausted = True
@@ -557,7 +563,12 @@ class SdcvClient:
             stdout_cap_bytes=remaining_cap,
         )
         remaining_cap = max(0, remaining_cap - used)
-        if warning in {"lookup_budget_exhausted", "lookup_cancelled", "sdcv_stdout_cap"}:
+        if warning in {
+            "lookup_budget_exhausted",
+            "lookup_cancelled",
+            "sdcv_stdout_cap",
+            "sdcv_stderr_cap",
+        }:
             return [], warning
         entries = list(exact_result["entries"]) if exact_result is not None else []
         warnings = [warning] if warning else []
@@ -599,6 +610,8 @@ class SdcvClient:
                     remaining_cap = max(0, remaining_cap - used)
                     if candidate_warning:
                         warnings.append(candidate_warning)
+                        if candidate_warning == "sdcv_stderr_cap":
+                            break
                     if candidate is not None:
                         entries.extend(candidate["entries"])
 

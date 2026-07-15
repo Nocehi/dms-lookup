@@ -29,6 +29,21 @@ class BundleError(RuntimeError):
     pass
 
 
+def validate_bundle_output(
+    root: pathlib.Path,
+    output: pathlib.Path,
+    protected_inputs: Iterable[pathlib.Path] = (),
+) -> pathlib.Path:
+    root = root.resolve(strict=True)
+    output = output.resolve()
+    if output == root or root in output.parents:
+        raise BundleError("review bundle output must be outside repository root")
+    for protected in protected_inputs:
+        if output == protected.resolve():
+            raise BundleError("review bundle output overlaps protected input")
+    return output
+
+
 def load_requirements(path: pathlib.Path) -> dict[str, list[str]]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -276,6 +291,7 @@ def write_review_metadata(
         json.dumps(
             {
                 "release_session_id": release_session_id,
+                "source_manifest_schema_version": source_manifest["schema_version"],
                 "source_digest": source_manifest["digest"],
                 "source_digest_algorithm": source_manifest["algorithm"],
             },
@@ -535,6 +551,11 @@ def build_bundle(
     binding_path: pathlib.Path,
     sentinel: bytes,
 ) -> None:
+    output = validate_bundle_output(
+        root,
+        output,
+        (requirements_path, binding_path),
+    )
     try:
         binding, selected_groups = release_evidence.verify_binding(
             root, requirements_path, binding_path
@@ -565,7 +586,6 @@ def build_bundle(
         binding_path.resolve().relative_to(root.resolve()).as_posix()
     )
     binding_digest = sha256_file(binding_path)
-    output = output.resolve()
     if sentinel in os.fspath(output).encode("utf-8"):
         raise BundleError("privacy sentinel found in requested bundle filename")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -630,6 +650,11 @@ def orchestrate_release_bundle(
     requirements_path: pathlib.Path,
     context_path: pathlib.Path,
 ) -> None:
+    output = validate_bundle_output(
+        root,
+        output,
+        (requirements_path, context_path),
+    )
     try:
         context = release_evidence.load_context(context_path)
         release_evidence.verify_source_unchanged(root, context)

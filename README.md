@@ -189,10 +189,16 @@ Quickshell IPC may need to run outside a filesystem/socket sandbox.
 Start a release context before collecting evidence, then record each generated
 evidence file with `packaging/release_evidence.py`. Finally run
 `packaging/build-review-bundle.sh --release-context CONTEXT --output PATH`.
-The context binds one release session and every selected evidence checksum to a
-canonical digest of the current source paths and bytes. Generated evidence,
-caches, archives, and the external audit handoff are excluded from that source
-digest and from source staging.
+`PATH` must resolve outside the repository and must not overlap the release
+context, requirements, binding, recorded evidence, or any source input; this
+collision check runs before the builder creates temporary or durable output.
+The context binds one release session and every selected evidence checksum to
+source-manifest schema 2, algorithm
+`sha256-regular-path-mode-size-and-bytes-v2`. Each entry and the overall digest
+bind regular-file type, path, `stat.S_IMODE` permission bits, size, and bytes;
+setuid/setgid or non-regular source candidates are rejected. Generated
+evidence, caches, archives, and the external audit handoff are excluded from
+that source digest and from source staging.
 
 The bundle command generates one privacy sentinel in orchestration-process
 memory, passes that same value to the privacy verifier and internal bundle

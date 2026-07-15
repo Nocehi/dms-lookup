@@ -258,6 +258,122 @@ class TransportIntegrationTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertFalse(backend_socket_path(create=False).exists())
 
+    def test_bind_before_listen_window_is_excluded_across_server_lifecycle(self):
+        bound_before_listen = threading.Event()
+        allow_listen = threading.Event()
+        real_socket = runtime_module.socket.socket
+        factory_lock = threading.Lock()
+        barrier_assigned = False
+
+        class ListenBarrierSocket:
+            def __init__(self, delegate):
+                self._delegate = delegate
+
+            def __getattr__(self, name):
+                return getattr(self._delegate, name)
+
+            def listen(self, backlog):
+                bound_before_listen.set()
+                if not allow_listen.wait(2.0):
+                    raise TimeoutError("test barrier timed out before listen")
+                return self._delegate.listen(backlog)
+
+        def socket_factory(*args, **kwargs):
+            nonlocal barrier_assigned
+            delegate = real_socket(*args, **kwargs)
+            family = args[0] if args else kwargs.get("family")
+            kind = args[1] if len(args) > 1 else kwargs.get("type")
+            with factory_lock:
+                if (
+                    not barrier_assigned
+                    and family == socket.AF_UNIX
+                    and kind == socket.SOCK_STREAM
+                ):
+                    barrier_assigned = True
+                    return ListenBarrierSocket(delegate)
+            return delegate
+
+        def identifying_handler(name):
+            def handle(_request, _cancel_event):
+                return {"status": "ok", "server": name}
+
+            return handle
+
+        path = backend_socket_path()
+        first = PrivateBackendServer(
+            identifying_handler("one"), idle_timeout=1.0, path=path
+        )
+        second = PrivateBackendServer(
+            identifying_handler("two"), idle_timeout=1.0, path=path
+        )
+        first_errors: list[BaseException] = []
+        second_errors: list[BaseException] = []
+
+        def serve(server, errors):
+            try:
+                server.serve()
+            except BaseException as exc:  # captured for assertions from this thread
+                errors.append(exc)
+
+        with mock.patch.object(
+            runtime_module.socket, "socket", side_effect=socket_factory
+        ):
+            first_thread = threading.Thread(
+                target=serve, args=(first, first_errors), daemon=True
+            )
+            second_thread = threading.Thread(
+                target=serve, args=(second, second_errors), daemon=True
+            )
+            first_thread.start()
+            self.servers.append((first, first_thread))
+            self.assertTrue(bound_before_listen.wait(1.0))
+            first_info = path.lstat()
+            first_identity = (first_info.st_dev, first_info.st_ino)
+
+            second_thread.start()
+            self.servers.append((second, second_thread))
+            try:
+                second_thread.join(timeout=0.5)
+                self.assertFalse(
+                    second_thread.is_alive(),
+                    "second server entered service while the first was bound before listen",
+                )
+                self.assertEqual(len(second_errors), 1)
+                self.assertIsInstance(second_errors[0], RuntimeSecurityError)
+                self.assertIn("lifecycle", str(second_errors[0]))
+                current_info = path.lstat()
+                self.assertEqual(
+                    (current_info.st_dev, current_info.st_ino), first_identity
+                )
+                self.assertTrue(
+                    (path.parent / "backend-server.lock").is_file(),
+                    "server lifecycle lock was not retained as a stable inode",
+                )
+
+                allow_listen.set()
+                deadline = time.monotonic() + 1.0
+                response = None
+                while time.monotonic() < deadline:
+                    try:
+                        response = request_backend(envelope(71), path=path)
+                        break
+                    except OSError:
+                        time.sleep(0.01)
+                self.assertIsNotNone(response, first_errors)
+                self.assertEqual(response["server"], "one")
+            finally:
+                allow_listen.set()
+                second._stop.set()
+                first._stop.set()
+                second_thread.join(timeout=1.0)
+                first_thread.join(timeout=1.0)
+
+        self.assertEqual(first_errors, [])
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertFalse(path.exists())
+        self.assertTrue((path.parent / "backend-server.lock").is_file())
+
     def test_live_socket_cannot_be_taken_over_or_unlinked_by_previous_server(self):
         def identifying_handler(name):
             def handle(_request, _cancel_event):
@@ -329,32 +445,23 @@ class TransportIntegrationTests(unittest.TestCase):
         # Exercise shutdown ownership independently: if the bound name is
         # replaced, the previous server must not unlink the replacement.
         path.unlink()
-        second_errors.clear()
-        second_thread = threading.Thread(target=serve_second, daemon=True)
-        second_thread.start()
-        self.servers.append((second, second_thread))
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            if path.is_socket():
-                break
-            if not second_thread.is_alive():
-                break
-            time.sleep(0.01)
-        self.assertTrue(path.is_socket(), second_errors)
-        replacement_info = path.lstat()
-        replacement_identity = (replacement_info.st_dev, replacement_info.st_ino)
-        self.assertNotEqual(replacement_identity, first_identity)
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            replacement.bind(str(path))
+            replacement_info = path.lstat()
+            replacement_identity = (replacement_info.st_dev, replacement_info.st_ino)
+            self.assertNotEqual(replacement_identity, first_identity)
 
-        first_thread.join(timeout=1.5)
-        self.assertFalse(first_thread.is_alive())
-        self.assertTrue(path.is_socket())
-        current_info = path.lstat()
-        self.assertEqual((current_info.st_dev, current_info.st_ino), replacement_identity)
-        self.assertEqual(request_backend(envelope(10), path=path)["server"], "two")
-
-        second._stop.set()
-        second_thread.join(timeout=1.0)
-        self.assertFalse(second_thread.is_alive())
+            first_thread.join(timeout=1.5)
+            self.assertFalse(first_thread.is_alive())
+            self.assertTrue(path.is_socket())
+            current_info = path.lstat()
+            self.assertEqual(
+                (current_info.st_dev, current_info.st_ino), replacement_identity
+            )
+        finally:
+            replacement.close()
+            path.unlink(missing_ok=True)
 
     def test_owned_stale_socket_is_recovered(self):
         path = backend_socket_path()

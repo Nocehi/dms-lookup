@@ -140,9 +140,12 @@ def run_bounded_protocol(
     cancel_after_seconds: float | None = None,
     cancellation_event: threading.Event | None = None,
     stdout_cap_bytes: int = DEFAULT_STDOUT_CAP_BYTES,
+    stderr_cap_bytes: int = STDERR_CAP_BYTES,
     inspect_query_cmdline: bool = False,
     evidence_dir: pathlib.Path | None = None,
 ) -> tuple[dict[str, Any], bytes]:
+    stdout_cap_bytes = max(1, int(stdout_cap_bytes))
+    stderr_cap_bytes = max(1, int(stderr_cap_bytes))
     stdout_name = f"{name}.stdout.bin"
     stderr_name = f"{name}.stderr.bin"
     cmdline_name = f"{name}.cmdline.bin"
@@ -205,13 +208,18 @@ def run_bounded_protocol(
 
     def kill(reason: str) -> None:
         nonlocal killed, termination_reason
-        if killed or process.poll() is not None:
+        if killed:
             return
         killed = True
         termination_reason = reason
         decisions.append(reason)
         close_stdin()
         _kill_process_group(process)
+        for selector_key in list(selector.get_map().values()):
+            try:
+                selector.unregister(selector_key.fileobj)
+            except (KeyError, ValueError):
+                pass
 
     try:
         while selector.get_map() or process.poll() is None:
@@ -224,8 +232,13 @@ def run_bounded_protocol(
                 kill("timeout")
             events = selector.select(0.01)
             for key, _mask in events:
+                if killed:
+                    break
+                observed = stdout_observed if key.data == "stdout" else stderr_observed
+                cap_bytes = stdout_cap_bytes if key.data == "stdout" else stderr_cap_bytes
+                read_size = min(64 * 1024, max(1, cap_bytes - observed + 1))
                 try:
-                    chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                    chunk = os.read(key.fileobj.fileno(), read_size)
                 except BlockingIOError:
                     continue
                 if not chunk:
@@ -253,8 +266,10 @@ def run_bounded_protocol(
                         kill("stdout_cap")
                 else:
                     stderr_observed += len(chunk)
-                    remaining = max(0, STDERR_CAP_BYTES - len(stderr_buffer))
+                    remaining = max(0, stderr_cap_bytes - len(stderr_buffer))
                     stderr_buffer.extend(chunk[:remaining])
+                    if stderr_observed > stderr_cap_bytes:
+                        kill("stderr_cap")
             if main_prompts >= 1 and not query_sent:
                 if query is None:
                     if close_on_initial_prompt:
@@ -309,7 +324,9 @@ def run_bounded_protocol(
         "stdout_bytes": stdout_observed,
         "stdout_stored_bytes": len(stdout_buffer),
         "stderr_bytes": stderr_observed,
+        "stderr_stored_bytes": len(stderr_buffer),
         "stdout_cap_bytes": stdout_cap_bytes,
+        "stderr_cap_bytes": stderr_cap_bytes,
         "stdout_file": stdout_name,
         "stderr_file": stderr_name,
         "cmdline_file": cmdline_name if inspect_query_cmdline else None,
