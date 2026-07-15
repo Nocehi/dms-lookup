@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import platform
+import re
 import secrets
 import shutil
 import stat
@@ -23,6 +24,13 @@ import release_evidence
 
 
 ARCHIVE_ROOT = "dank-lookup-review"
+SDCV_GATE_SCHEMA_VERSION = 2
+SDCV_GATE_KIND = "sdcv_0_5_5_stdin_feasibility_gate"
+SDCV_REQUIRED_VERSION = "0.5.5"
+SDCV_STDERR_CAP_BYTES = 1024 * 1024
+SDCV_VERSION_PATTERN = re.compile(
+    r"\bversion\s+(\d+(?:\.\d+){2})(?![A-Za-z0-9_.+-])", re.IGNORECASE
+)
 
 
 class BundleError(RuntimeError):
@@ -98,17 +106,68 @@ def _has_nonempty_raw_samples(value: object) -> bool:
     return False
 
 
-def validate_evidence_content(evidence_by_group: dict[str, list[pathlib.Path]]) -> None:
-    sdcv_reports = [
-        _load_json(path) for path in evidence_by_group["sdcv_gate_report"]
-    ]
-    if not any(
-        report.get("verdict") == "pass"
-        and str(report.get("sdcv_version", "")).startswith("0.5.5")
-        and not report.get("gate_errors")
-        for report in sdcv_reports
+def validate_sdcv_gate_report(report: dict) -> None:
+    cases = report.get("cases")
+    raw_version = report.get("sdcv_version_raw")
+    version_match = (
+        SDCV_VERSION_PATTERN.search(raw_version)
+        if isinstance(raw_version, str)
+        else None
+    )
+    stderr_over_cap = (
+        [
+            case
+            for case in cases
+            if isinstance(case, dict) and case.get("name") == "stderr_over_cap"
+        ]
+        if isinstance(cases, list)
+        else []
+    )
+    valid_case = len(stderr_over_cap) == 1 and all(
+        (
+            stderr_over_cap[0].get("status") == "pass",
+            stderr_over_cap[0].get("errors") == [],
+            stderr_over_cap[0].get("stderr_cap_bytes") == SDCV_STDERR_CAP_BYTES,
+            stderr_over_cap[0].get("termination_reason") == "stderr_cap",
+            stderr_over_cap[0].get("stderr_bytes") == SDCV_STDERR_CAP_BYTES + 1,
+            stderr_over_cap[0].get("stderr_stored_bytes")
+            == SDCV_STDERR_CAP_BYTES,
+            stderr_over_cap[0].get("process_group_reaped") is True,
+        )
+    )
+    if not all(
+        (
+            report.get("schema_version") == SDCV_GATE_SCHEMA_VERSION,
+            report.get("kind") == SDCV_GATE_KIND,
+            report.get("verdict") == "pass",
+            report.get("sdcv_version") == SDCV_REQUIRED_VERSION,
+            version_match is not None
+            and version_match.group(1) == SDCV_REQUIRED_VERSION,
+            report.get("gate_errors") == [],
+            report.get("stderr_cap_bytes") == SDCV_STDERR_CAP_BYTES,
+            isinstance(cases, list) and bool(cases),
+            valid_case,
+        )
     ):
+        raise BundleError("invalid sdcv 0.5.5 stdin gate evidence")
+
+
+def validate_sdcv_gate_reports(paths: Iterable[pathlib.Path]) -> None:
+    sdcv_reports = [_load_json(path) for path in paths]
+    valid_sdcv_report = False
+    for report in sdcv_reports:
+        try:
+            validate_sdcv_gate_report(report)
+        except BundleError:
+            continue
+        valid_sdcv_report = True
+        break
+    if not valid_sdcv_report:
         raise BundleError("sdcv gate evidence has no passing 0.5.5 verdict")
+
+
+def validate_evidence_content(evidence_by_group: dict[str, list[pathlib.Path]]) -> None:
+    validate_sdcv_gate_reports(evidence_by_group["sdcv_gate_report"])
 
     socket_reports = [
         _load_json(path) for path in evidence_by_group["socket_gate_report"]

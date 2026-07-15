@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
@@ -14,6 +15,8 @@ import tarfile
 import tempfile
 import unittest
 from unittest import mock
+
+import jsonschema
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -43,6 +46,13 @@ EVIDENCE_SPEC = importlib.util.spec_from_file_location(
 assert EVIDENCE_SPEC is not None and EVIDENCE_SPEC.loader is not None
 release_evidence = importlib.util.module_from_spec(EVIDENCE_SPEC)
 EVIDENCE_SPEC.loader.exec_module(release_evidence)
+
+SDCV_PROBE_SPEC = importlib.util.spec_from_file_location(
+    "probe_sdcv_stdin", ROOT / "tests/probe_sdcv_stdin.py"
+)
+assert SDCV_PROBE_SPEC is not None and SDCV_PROBE_SPEC.loader is not None
+probe_sdcv_stdin = importlib.util.module_from_spec(SDCV_PROBE_SPEC)
+SDCV_PROBE_SPEC.loader.exec_module(probe_sdcv_stdin)
 
 
 class ManagedManifestUnitTests(unittest.TestCase):
@@ -744,6 +754,288 @@ print(hashlib.sha256(value).hexdigest(), int(argv_leak), int(env_leak))
                     "roots": {"home_bin": ["same", "same"]},
                 }
             )
+
+
+class SdcvGateEvidenceTests(unittest.TestCase):
+    STDERR_CAP_BYTES = 1024 * 1024
+    STDOUT_CAP_BYTES = 64 * 1024 * 1024
+    SCHEMA_PATH = ROOT / "tests/fixtures-sdcv-stdin/evidence-schema.json"
+    CASE_NAMES = (
+        "exact_hit",
+        "exact_miss",
+        "fuzzy_choice",
+        "single_dictionary",
+        "multiple_dictionaries",
+        "unicode_en",
+        "unicode_han",
+        "unicode_ja",
+        "unicode_yue",
+        "stdin_eof_after_exact",
+        "stdin_eof_at_main_prompt",
+        "source_timeout",
+        "overall_timeout",
+        "cancellation",
+        "stdout_under_cap_32mib",
+        "stdout_over_cap",
+        "stderr_over_cap",
+        "sentinel_cmdline",
+    )
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        schema = json.loads(cls.SCHEMA_PATH.read_text(encoding="utf-8"))
+        validator_class = jsonschema.validators.validator_for(schema)
+        validator_class.check_schema(schema)
+        cls.schema_validator = validator_class(schema)
+
+    def _case(self, name: str) -> dict:
+        termination_reason = None
+        returncode = 0
+        stdout_bytes = 0
+        stdout_stored_bytes = 0
+        stderr_bytes = 0
+        stderr_stored_bytes = 0
+        if name in {"source_timeout", "overall_timeout"}:
+            termination_reason = "timeout"
+            returncode = -9
+        elif name == "cancellation":
+            termination_reason = "cancelled"
+            returncode = -9
+        elif name == "stdout_over_cap":
+            termination_reason = "stdout_cap"
+            returncode = -9
+            stdout_bytes = self.STDOUT_CAP_BYTES + 1
+            stdout_stored_bytes = self.STDOUT_CAP_BYTES
+        elif name == "stderr_over_cap":
+            termination_reason = "stderr_cap"
+            returncode = -9
+            stderr_bytes = self.STDERR_CAP_BYTES + 1
+            stderr_stored_bytes = self.STDERR_CAP_BYTES
+        return {
+            "name": name,
+            "argv_metadata": ["--json"],
+            "query_bytes": 0,
+            "choice": None,
+            "pid": 1234,
+            "returncode": returncode,
+            "duration_ms": 1.0,
+            "termination_reason": termination_reason,
+            "stdout_bytes": stdout_bytes,
+            "stdout_stored_bytes": stdout_stored_bytes,
+            "stderr_bytes": stderr_bytes,
+            "stderr_stored_bytes": stderr_stored_bytes,
+            "stdout_cap_bytes": self.STDOUT_CAP_BYTES,
+            "stderr_cap_bytes": self.STDERR_CAP_BYTES,
+            "stdout_file": f"{name}.stdout.bin",
+            "stderr_file": f"{name}.stderr.bin",
+            "cmdline_file": None,
+            "query_in_cmdline": False,
+            "main_prompt_count": 0,
+            "choice_prompt_count": 0,
+            "process_group_reaped": True,
+            "runner_decisions": [],
+            "errors": [],
+            "status": "pass",
+        }
+
+    def _sdcv_report(
+        self,
+        *,
+        version_returncode: int = 0,
+        version_raw: str = "Console version of Stardict, version 0.5.5",
+    ) -> dict:
+        return probe_sdcv_stdin.build_gate_report(
+            version_returncode=version_returncode,
+            version_raw=version_raw,
+            history_paths=[],
+            cases=[self._case(name) for name in self.CASE_NAMES],
+        )
+
+    def _validate_schema(self, report: dict) -> None:
+        self.schema_validator.validate(report)
+
+    def _validate(self, report: dict) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            review_bundle.validate_sdcv_gate_reports([path])
+
+    def test_producer_version_parser_normalizes_three_part_versions(self):
+        for version, expected in (
+            ("0.5.5", "0.5.5"),
+            ("0.5.50", "0.5.50"),
+            ("0.5.5.1", ""),
+            ("0.5.5-beta", ""),
+            ("0.5.5+meta", ""),
+        ):
+            with self.subTest(version=version):
+                self.assertEqual(
+                    probe_sdcv_stdin.parse_sdcv_version(
+                        f"Console version of Stardict, version {version}"
+                    ),
+                    expected,
+                )
+
+    def test_producer_pass_report_matches_schema_and_consumer(self):
+        report = self._sdcv_report()
+        self.assertEqual(report["verdict"], "pass")
+        self.assertEqual(report["sdcv_version"], "0.5.5")
+        self.assertEqual(report["gate_errors"], [])
+        self._validate_schema(report)
+        self._validate(report)
+
+    def test_producer_fail_report_matches_schema_and_consumer_rejects(self):
+        report = self._sdcv_report(
+            version_raw="Console version of Stardict, version 0.5.6"
+        )
+        self.assertEqual(report["verdict"], "fail")
+        self.assertEqual(report["sdcv_version"], "0.5.6")
+        self.assertEqual(
+            report["gate_errors"],
+            ["installed sdcv is not the required 0.5.5 binary"],
+        )
+        self._validate_schema(report)
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
+
+    def test_schema_rejects_malformed_producer_reports(self):
+        missing_raw = self._sdcv_report()
+        del missing_raw["sdcv_version_raw"]
+        wrong_cap = self._sdcv_report()
+        wrong_cap["stderr_cap_bytes"] = self.STDERR_CAP_BYTES - 1
+        wrong_case_cap = self._sdcv_report()
+        wrong_case_cap["cases"][0]["stderr_cap_bytes"] = self.STDERR_CAP_BYTES - 1
+        wrong_gate_errors = self._sdcv_report()
+        wrong_gate_errors["gate_errors"] = "not-an-array"
+        wrong_verdict = self._sdcv_report()
+        wrong_verdict["verdict"] = "unknown"
+
+        for name, report in (
+            ("missing_raw_version", missing_raw),
+            ("wrong_stderr_cap", wrong_cap),
+            ("wrong_case_stderr_cap", wrong_case_cap),
+            ("wrong_gate_errors_shape", wrong_gate_errors),
+            ("wrong_verdict", wrong_verdict),
+        ):
+            with self.subTest(name=name), self.assertRaises(
+                jsonschema.exceptions.ValidationError
+            ):
+                self._validate_schema(report)
+
+    def test_consumer_rejects_schema_valid_semantic_mismatches(self):
+        for name, field, value in (
+            ("fail_verdict", "verdict", "fail"),
+            ("nonempty_gate_errors", "gate_errors", ["forced failure"]),
+            (
+                "non_normalized_version",
+                "sdcv_version",
+                "Console version of Stardict, version 0.5.5",
+            ),
+            ("near_match_version", "sdcv_version", "0.5.50"),
+        ):
+            with self.subTest(name=name):
+                report = self._sdcv_report()
+                report[field] = value
+                self._validate_schema(report)
+                with self.assertRaises(review_bundle.BundleError):
+                    self._validate(report)
+
+    def test_review_bundle_content_validation_delegates_sdcv_group(self):
+        paths = [pathlib.Path("sdcv-report.json")]
+        with (
+            mock.patch.object(
+                review_bundle,
+                "validate_sdcv_gate_reports",
+                side_effect=review_bundle.BundleError("delegated sdcv rejection"),
+            ) as validate,
+            self.assertRaisesRegex(review_bundle.BundleError, "delegated sdcv rejection"),
+        ):
+            review_bundle.validate_evidence_content({"sdcv_gate_report": paths})
+        validate.assert_called_once_with(paths)
+
+    def test_schema_version_1_is_rejected(self):
+        report = self._sdcv_report()
+        report["schema_version"] = 1
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
+
+    def test_wrong_or_missing_kind_is_rejected(self):
+        for kind in ("wrong", None):
+            with self.subTest(kind=kind):
+                report = self._sdcv_report()
+                if kind is None:
+                    del report["kind"]
+                else:
+                    report["kind"] = kind
+                with self.assertRaises(review_bundle.BundleError):
+                    self._validate(report)
+
+    def test_missing_stderr_cap_bytes_is_rejected(self):
+        report = self._sdcv_report()
+        del report["stderr_cap_bytes"]
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
+
+    def test_incorrect_stderr_cap_bytes_is_rejected(self):
+        report = self._sdcv_report()
+        report["stderr_cap_bytes"] = self.STDERR_CAP_BYTES - 1
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
+
+    def test_nonexact_raw_version_is_rejected(self):
+        for version in ("0.5.50", "0.5.5.1", "0.5.5-beta", "0.5.5+meta"):
+            with self.subTest(version=version):
+                report = self._sdcv_report()
+                report["sdcv_version_raw"] = (
+                    f"Console version of Stardict, version {version}"
+                )
+                with self.assertRaises(review_bundle.BundleError):
+                    self._validate(report)
+
+    def test_empty_cases_are_rejected(self):
+        report = self._sdcv_report()
+        report["cases"] = []
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
+
+    def test_missing_stderr_over_cap_case_is_rejected(self):
+        report = self._sdcv_report()
+        report["cases"] = [
+            case for case in report["cases"] if case["name"] != "stderr_over_cap"
+        ]
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
+
+    def test_duplicate_stderr_over_cap_cases_are_rejected(self):
+        report = self._sdcv_report()
+        over_cap = next(
+            case for case in report["cases"] if case["name"] == "stderr_over_cap"
+        )
+        report["cases"].append(copy.deepcopy(over_cap))
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
+
+    def test_incorrect_stderr_over_cap_semantics_are_rejected(self):
+        mutations = {
+            "termination_reason": "timeout",
+            "stderr_bytes": self.STDERR_CAP_BYTES + 2,
+            "stderr_stored_bytes": self.STDERR_CAP_BYTES - 1,
+            "process_group_reaped": False,
+            "stderr_cap_bytes": self.STDERR_CAP_BYTES - 1,
+            "status": "fail",
+            "errors": ["stderr gate failed"],
+        }
+        for field, invalid_value in mutations.items():
+            with self.subTest(field=field):
+                report = self._sdcv_report()
+                over_cap = next(
+                    case
+                    for case in report["cases"]
+                    if case["name"] == "stderr_over_cap"
+                )
+                over_cap[field] = invalid_value
+                with self.assertRaises(review_bundle.BundleError):
+                    self._validate(report)
 
 
 class PackagingMatrixTests(unittest.TestCase):

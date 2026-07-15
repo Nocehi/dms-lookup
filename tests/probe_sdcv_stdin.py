@@ -41,6 +41,10 @@ from dank_lookup_sdcv_stdin import (  # noqa: E402
 )
 DEFAULT_CAP_BYTES = PRODUCTION_STDOUT_CAP_BYTES
 STDERR_CAP_BYTES = PRODUCTION_STDERR_CAP_BYTES
+SDCV_REQUIRED_VERSION = "0.5.5"
+SDCV_VERSION_PATTERN = re.compile(
+    r"\bversion\s+(\d+(?:\.\d+){2})(?![A-Za-z0-9_.+-])", re.IGNORECASE
+)
 MAIN_PROMPT = b"Enter word or phrase: "
 CHOICE_PROMPT = b"Your choice[-1 to abort]: "
 GIANT_UNDER_BYTES = 32 * 1024 * 1024
@@ -52,6 +56,42 @@ GIANT_OVER_BOOK = "DANK_STDIN_GIANT_OVER"
 def load_json(path: pathlib.Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def parse_sdcv_version(version_raw: str) -> str:
+    version_match = SDCV_VERSION_PATTERN.search(version_raw)
+    return version_match.group(1) if version_match is not None else ""
+
+
+def build_gate_report(
+    *,
+    version_returncode: int,
+    version_raw: str,
+    history_paths: list[str],
+    cases: list[dict[str, Any]],
+) -> dict[str, Any]:
+    parsed_version = parse_sdcv_version(version_raw)
+    gate_errors = []
+    if version_returncode != 0 or parsed_version != SDCV_REQUIRED_VERSION:
+        gate_errors.append("installed sdcv is not the required 0.5.5 binary")
+    if history_paths:
+        gate_errors.append("sdcv history files were created")
+    failed_cases = [case["name"] for case in cases if case["status"] != "pass"]
+    if failed_cases:
+        gate_errors.append("failed cases: " + ", ".join(failed_cases))
+    return {
+        "schema_version": 2,
+        "kind": "sdcv_0_5_5_stdin_feasibility_gate",
+        "verdict": "pass" if not gate_errors else "fail",
+        "sdcv_version": parsed_version,
+        "sdcv_version_raw": version_raw,
+        "stdout_cap_bytes": DEFAULT_CAP_BYTES,
+        "stderr_cap_bytes": STDERR_CAP_BYTES,
+        "history_environment": {"SDCV_HISTFILE": "/dev/null", "SDCV_HISTSIZE": "0"},
+        "history_paths": history_paths,
+        "gate_errors": gate_errors,
+        "cases": cases,
+    }
 
 
 def build_dictionary(directory: pathlib.Path, dictionary: dict[str, Any]) -> None:
@@ -982,26 +1022,13 @@ def gate(args: argparse.Namespace) -> int:
         check=False,
         timeout=2.0,
     )
-    gate_errors = []
-    if version.returncode != 0 or "version 0.5.5" not in version.stdout:
-        gate_errors.append("installed sdcv is not the required 0.5.5 binary")
-    if history_paths:
-        gate_errors.append("sdcv history files were created")
-    failed_cases = [case["name"] for case in cases if case["status"] != "pass"]
-    if failed_cases:
-        gate_errors.append("failed cases: " + ", ".join(failed_cases))
-    report = {
-        "schema_version": 2,
-        "kind": "sdcv_0_5_5_stdin_feasibility_gate",
-        "verdict": "pass" if not gate_errors else "fail",
-        "sdcv_version": version.stdout.strip(),
-        "stdout_cap_bytes": DEFAULT_CAP_BYTES,
-        "stderr_cap_bytes": STDERR_CAP_BYTES,
-        "history_environment": {"SDCV_HISTFILE": "/dev/null", "SDCV_HISTSIZE": "0"},
-        "history_paths": history_paths,
-        "gate_errors": gate_errors,
-        "cases": cases,
-    }
+    version_raw = version.stdout.strip()
+    report = build_gate_report(
+        version_returncode=version.returncode,
+        version_raw=version_raw,
+        history_paths=history_paths,
+        cases=cases,
+    )
     report_path = evidence_dir / "report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(report_path)
