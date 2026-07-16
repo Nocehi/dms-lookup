@@ -155,9 +155,34 @@ last-known-good reload. DMS tokens are mapped only inside the optional wrapper.
 
 ## Tests and benchmarks
 
+On a fresh checkout, create an isolated Python environment and install the
+exact release/test dependency set before running the minimum suite. The same
+`jsonschema` installation is used by the production review-bundle consumer;
+missing or version-skewed dependencies are rejected by the pre-release
+preflight.
+
 ```bash
-python3 -m unittest -v tests.test_core tests.test_runtime tests.test_cli
+python3 -m venv /tmp/dank-lookup-venv
+. /tmp/dank-lookup-venv/bin/activate
+python3 -m pip install --requirement requirements-dev.txt
+```
+
+The pre-release shell gate additionally requires Bash, ripgrep, ShellCheck,
+GNU coreutils/findutils, and grep on `PATH`. Rust tokenizer tests require a
+Rust toolchain; QML smoke requires the locally supported Quickshell/QML tools.
+
+```bash
+python3 -m unittest -v \
+  tests.test_benchmarks \
+  tests.test_cancellation_full_stack \
+  tests.test_cli \
+  tests.test_core \
+  tests.test_packaging \
+  tests.test_runtime \
+  tests.test_selection_latency \
+  tests.test_transport
 bash packaging/pre-release-check.sh
+cargo test --manifest-path tokenizer/Cargo.toml --locked
 python3 tests/run_qml_smoke.py
 qmllint /path/to/staged/quickshell/dank-lookup/shell.qml
 python3 tests/benchmark_lookup.py \

@@ -22,15 +22,53 @@ from typing import Iterable
 
 import release_evidence
 
+try:
+    import jsonschema
+except ModuleNotFoundError:
+    jsonschema = None
+
 
 ARCHIVE_ROOT = "dank-lookup-review"
 SDCV_GATE_SCHEMA_VERSION = 2
 SDCV_GATE_KIND = "sdcv_0_5_5_stdin_feasibility_gate"
 SDCV_REQUIRED_VERSION = "0.5.5"
+SDCV_STDOUT_CAP_BYTES = 64 * 1024 * 1024
 SDCV_STDERR_CAP_BYTES = 1024 * 1024
+SDCV_GATE_SCHEMA_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "tests/fixtures-sdcv-stdin/evidence-schema.json"
+)
+SDCV_REQUIRED_CASES = (
+    "exact_hit",
+    "exact_miss",
+    "fuzzy_choice",
+    "single_dictionary",
+    "multiple_dictionaries",
+    "unicode_en",
+    "unicode_han",
+    "unicode_ja",
+    "unicode_yue",
+    "stdin_eof_after_exact",
+    "stdin_eof_at_main_prompt",
+    "source_timeout",
+    "overall_timeout",
+    "cancellation",
+    "stdout_under_cap_32mib",
+    "stdout_over_cap",
+    "stderr_over_cap",
+    "sentinel_cmdline",
+)
+SDCV_EXPECTED_TERMINATIONS = {
+    "source_timeout": "timeout",
+    "overall_timeout": "timeout",
+    "cancellation": "cancelled",
+    "stdout_over_cap": "stdout_cap",
+    "stderr_over_cap": "stderr_cap",
+}
 SDCV_VERSION_PATTERN = re.compile(
     r"\bversion\s+(\d+(?:\.\d+){2})(?![A-Za-z0-9_.+-])", re.IGNORECASE
 )
+_SDCV_GATE_VALIDATOR = None
 
 
 class BundleError(RuntimeError):
@@ -106,34 +144,51 @@ def _has_nonempty_raw_samples(value: object) -> bool:
     return False
 
 
-def validate_sdcv_gate_report(report: dict) -> None:
-    cases = report.get("cases")
+def _sdcv_gate_validator():
+    global _SDCV_GATE_VALIDATOR
+    if jsonschema is None:
+        raise BundleError(
+            "missing pinned release/test dependency jsonschema; "
+            "install requirements-dev.txt"
+        )
+    if _SDCV_GATE_VALIDATOR is not None:
+        return _SDCV_GATE_VALIDATOR
+    try:
+        schema = json.loads(SDCV_GATE_SCHEMA_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise BundleError("invalid sdcv schema-2 contract") from exc
+    if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+        raise BundleError("sdcv gate schema is not Draft 2020-12")
+    try:
+        jsonschema.Draft202012Validator.check_schema(schema)
+    except jsonschema.exceptions.SchemaError as exc:
+        raise BundleError("invalid sdcv schema-2 contract") from exc
+    _SDCV_GATE_VALIDATOR = jsonschema.Draft202012Validator(schema)
+    return _SDCV_GATE_VALIDATOR
+
+
+def _validate_sdcv_gate_schema(report: dict) -> None:
+    if jsonschema is None:
+        _sdcv_gate_validator()
+    try:
+        _sdcv_gate_validator().validate(report)
+    except jsonschema.exceptions.ValidationError as exc:
+        location = ".".join(str(part) for part in exc.absolute_path) or "<root>"
+        raise BundleError(
+            f"sdcv gate evidence violates schema-2 at {location}: {exc.message}"
+        ) from exc
+
+
+def _validate_sdcv_gate_semantics(report: dict) -> None:
+    def reject(reason: str) -> None:
+        raise BundleError(f"invalid sdcv 0.5.5 stdin gate evidence: {reason}")
+
+    cases = report["cases"]
     raw_version = report.get("sdcv_version_raw")
     version_match = (
         SDCV_VERSION_PATTERN.search(raw_version)
         if isinstance(raw_version, str)
         else None
-    )
-    stderr_over_cap = (
-        [
-            case
-            for case in cases
-            if isinstance(case, dict) and case.get("name") == "stderr_over_cap"
-        ]
-        if isinstance(cases, list)
-        else []
-    )
-    valid_case = len(stderr_over_cap) == 1 and all(
-        (
-            stderr_over_cap[0].get("status") == "pass",
-            stderr_over_cap[0].get("errors") == [],
-            stderr_over_cap[0].get("stderr_cap_bytes") == SDCV_STDERR_CAP_BYTES,
-            stderr_over_cap[0].get("termination_reason") == "stderr_cap",
-            stderr_over_cap[0].get("stderr_bytes") == SDCV_STDERR_CAP_BYTES + 1,
-            stderr_over_cap[0].get("stderr_stored_bytes")
-            == SDCV_STDERR_CAP_BYTES,
-            stderr_over_cap[0].get("process_group_reaped") is True,
-        )
     )
     if not all(
         (
@@ -144,24 +199,93 @@ def validate_sdcv_gate_report(report: dict) -> None:
             version_match is not None
             and version_match.group(1) == SDCV_REQUIRED_VERSION,
             report.get("gate_errors") == [],
+            report.get("stdout_cap_bytes") == SDCV_STDOUT_CAP_BYTES,
             report.get("stderr_cap_bytes") == SDCV_STDERR_CAP_BYTES,
-            isinstance(cases, list) and bool(cases),
-            valid_case,
+            report.get("history_environment")
+            == {"SDCV_HISTFILE": "/dev/null", "SDCV_HISTSIZE": "0"},
+            report.get("history_paths") == [],
         )
     ):
-        raise BundleError("invalid sdcv 0.5.5 stdin gate evidence")
+        reject("top-level verdict, version, cap, or history mismatch")
+
+    case_names = [case["name"] for case in cases]
+    if len(case_names) != len(SDCV_REQUIRED_CASES):
+        reject("wrong required-case count")
+    if len(set(case_names)) != len(case_names):
+        reject("duplicate required case")
+    if set(case_names) != set(SDCV_REQUIRED_CASES):
+        reject("missing or unknown required case")
+
+    for case in cases:
+        name = case["name"]
+        if case["status"] != "pass" or case["errors"] != []:
+            reject(f"{name} is not a clean passing case")
+        if case["query_in_cmdline"] is not False:
+            reject(f"{name} exposed the query in argv")
+        if case["process_group_reaped"] is not True:
+            reject(f"{name} did not reap its process group")
+        if case["stdout_cap_bytes"] != SDCV_STDOUT_CAP_BYTES:
+            reject(f"{name} has the wrong stdout cap")
+        if case["stderr_cap_bytes"] != SDCV_STDERR_CAP_BYTES:
+            reject(f"{name} has the wrong stderr cap")
+
+        for stream, cap in (
+            ("stdout", SDCV_STDOUT_CAP_BYTES),
+            ("stderr", SDCV_STDERR_CAP_BYTES),
+        ):
+            observed = case[f"{stream}_bytes"]
+            stored = case[f"{stream}_stored_bytes"]
+            if stored != min(observed, cap):
+                reject(f"{name} has inconsistent {stream} stored bytes")
+            over_cap_name = f"{stream}_over_cap"
+            if name == over_cap_name:
+                if observed != cap + 1 or stored != cap:
+                    reject(f"{name} does not stop at cap plus sentinel")
+            elif observed > cap:
+                reject(f"{name} exceeded its {stream} cap")
+
+        expected_termination = SDCV_EXPECTED_TERMINATIONS.get(name)
+        if case["termination_reason"] != expected_termination:
+            reject(f"{name} has the wrong termination reason")
+        returncode = case["returncode"]
+        if expected_termination is None:
+            if returncode != 0:
+                reject(f"{name} did not exit cleanly")
+        else:
+            if returncode >= 0:
+                reject(f"{name} was not signal-terminated")
+            if expected_termination not in case["runner_decisions"]:
+                reject(f"{name} lacks its termination decision")
+        if name == "cancellation" and "query_sent" not in case["runner_decisions"]:
+            reject("cancellation happened before the query was sent")
+
+    under_cap = next(
+        case for case in cases if case["name"] == "stdout_under_cap_32mib"
+    )
+    if not (32 * 1024 * 1024 < under_cap["stdout_bytes"] < SDCV_STDOUT_CAP_BYTES):
+        reject("32 MiB case does not prove bounded under-cap output")
+
+    sentinel = next(case for case in cases if case["name"] == "sentinel_cmdline")
+    if sentinel.get("sentinel_environment_match") is not False:
+        reject("sentinel query appeared in the environment")
+    if not isinstance(sentinel.get("cmdline_file"), str):
+        reject("sentinel cmdline capture is missing")
+
+
+def validate_sdcv_gate_report(report: dict) -> None:
+    _validate_sdcv_gate_schema(report)
+    _validate_sdcv_gate_semantics(report)
 
 
 def validate_sdcv_gate_reports(paths: Iterable[pathlib.Path]) -> None:
     sdcv_reports = [_load_json(path) for path in paths]
     valid_sdcv_report = False
     for report in sdcv_reports:
-        try:
-            validate_sdcv_gate_report(report)
-        except BundleError:
+        _validate_sdcv_gate_schema(report)
+        if report.get("verdict") != "pass":
             continue
+        _validate_sdcv_gate_semantics(report)
         valid_sdcv_report = True
-        break
     if not valid_sdcv_report:
         raise BundleError("sdcv gate evidence has no passing 0.5.5 verdict")
 

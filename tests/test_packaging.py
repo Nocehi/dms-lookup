@@ -16,7 +16,13 @@ import tempfile
 import unittest
 from unittest import mock
 
-import jsonschema
+try:
+    import jsonschema
+except ModuleNotFoundError:
+    raise SystemExit(
+        "missing pinned test dependency jsonschema; "
+        "install requirements-dev.txt"
+    ) from None
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -786,6 +792,7 @@ class SdcvGateEvidenceTests(unittest.TestCase):
         schema = json.loads(cls.SCHEMA_PATH.read_text(encoding="utf-8"))
         validator_class = jsonschema.validators.validator_for(schema)
         validator_class.check_schema(schema)
+        cls.schema_contract = schema
         cls.schema_validator = validator_class(schema)
 
     def _case(self, name: str) -> dict:
@@ -795,23 +802,31 @@ class SdcvGateEvidenceTests(unittest.TestCase):
         stdout_stored_bytes = 0
         stderr_bytes = 0
         stderr_stored_bytes = 0
+        runner_decisions = []
         if name in {"source_timeout", "overall_timeout"}:
             termination_reason = "timeout"
             returncode = -9
+            runner_decisions = ["timeout"]
         elif name == "cancellation":
             termination_reason = "cancelled"
             returncode = -9
+            runner_decisions = ["query_sent", "cancelled"]
+        elif name == "stdout_under_cap_32mib":
+            stdout_bytes = 32 * 1024 * 1024 + 1
+            stdout_stored_bytes = stdout_bytes
         elif name == "stdout_over_cap":
             termination_reason = "stdout_cap"
             returncode = -9
             stdout_bytes = self.STDOUT_CAP_BYTES + 1
             stdout_stored_bytes = self.STDOUT_CAP_BYTES
+            runner_decisions = ["stdout_cap"]
         elif name == "stderr_over_cap":
             termination_reason = "stderr_cap"
             returncode = -9
             stderr_bytes = self.STDERR_CAP_BYTES + 1
             stderr_stored_bytes = self.STDERR_CAP_BYTES
-        return {
+            runner_decisions = ["stderr_cap"]
+        result = {
             "name": name,
             "argv_metadata": ["--json"],
             "query_bytes": 0,
@@ -828,15 +843,18 @@ class SdcvGateEvidenceTests(unittest.TestCase):
             "stderr_cap_bytes": self.STDERR_CAP_BYTES,
             "stdout_file": f"{name}.stdout.bin",
             "stderr_file": f"{name}.stderr.bin",
-            "cmdline_file": None,
+            "cmdline_file": f"{name}.cmdline.bin" if name == "sentinel_cmdline" else None,
             "query_in_cmdline": False,
             "main_prompt_count": 0,
             "choice_prompt_count": 0,
             "process_group_reaped": True,
-            "runner_decisions": [],
+            "runner_decisions": runner_decisions,
             "errors": [],
             "status": "pass",
         }
+        if name == "sentinel_cmdline":
+            result["sentinel_environment_match"] = False
+        return result
 
     def _sdcv_report(
         self,
@@ -859,6 +877,17 @@ class SdcvGateEvidenceTests(unittest.TestCase):
             path = pathlib.Path(directory) / "report.json"
             path.write_text(json.dumps(report), encoding="utf-8")
             review_bundle.validate_sdcv_gate_reports([path])
+
+    def _assert_schema_invalid_and_consumer_rejects(self, report: dict) -> None:
+        with self.assertRaises(jsonschema.exceptions.ValidationError):
+            self._validate_schema(report)
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
+
+    def _assert_schema_valid_and_consumer_rejects(self, report: dict) -> None:
+        self._validate_schema(report)
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
 
     def test_producer_version_parser_normalizes_three_part_versions(self):
         for version, expected in (
@@ -897,6 +926,162 @@ class SdcvGateEvidenceTests(unittest.TestCase):
         self._validate_schema(report)
         with self.assertRaises(review_bundle.BundleError):
             self._validate(report)
+
+    def test_producer_case_failure_matches_schema_and_consumer_rejects(self):
+        cases = [self._case(name) for name in self.CASE_NAMES]
+        cases[0]["errors"] = ["forced producer failure"]
+        cases[0]["status"] = "fail"
+        report = probe_sdcv_stdin.build_gate_report(
+            version_returncode=0,
+            version_raw="Console version of Stardict, version 0.5.5",
+            history_paths=[],
+            cases=cases,
+        )
+        self.assertEqual(report["verdict"], "fail")
+        self.assertEqual(report["gate_errors"], ["failed cases: exact_hit"])
+        self._validate_schema(report)
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
+
+    def test_production_consumer_rejects_schema_invalid_incomplete_report(self):
+        report = {
+            "schema_version": 2,
+            "kind": "sdcv_0_5_5_stdin_feasibility_gate",
+            "verdict": "pass",
+            "sdcv_version": "0.5.5",
+            "sdcv_version_raw": "Console version of Stardict, version 0.5.5",
+            "stderr_cap_bytes": self.STDERR_CAP_BYTES,
+            "gate_errors": [],
+            "cases": [self._case("stderr_over_cap")],
+        }
+        with self.assertRaises(jsonschema.exceptions.ValidationError):
+            self._validate_schema(report)
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate(report)
+
+    def test_required_case_set_matches_schema_and_consumer(self):
+        schema_names = tuple(
+            self.schema_contract["$defs"]["case"]["properties"]["name"]["enum"]
+        )
+        self.assertEqual(schema_names, self.CASE_NAMES)
+
+        for missing_name in self.CASE_NAMES:
+            with self.subTest(kind="missing", case=missing_name):
+                report = self._sdcv_report()
+                report["cases"] = [
+                    case for case in report["cases"] if case["name"] != missing_name
+                ]
+                self._assert_schema_invalid_and_consumer_rejects(report)
+
+            with self.subTest(kind="duplicate", case=missing_name):
+                report = self._sdcv_report()
+                duplicate = next(
+                    case for case in report["cases"] if case["name"] != missing_name
+                )
+                report["cases"] = [
+                    case for case in report["cases"] if case["name"] != missing_name
+                ]
+                report["cases"].append(copy.deepcopy(duplicate))
+                self._assert_schema_invalid_and_consumer_rejects(report)
+
+    def test_missing_required_fields_are_rejected_by_schema_and_consumer(self):
+        for field in self.schema_contract["required"]:
+            with self.subTest(scope="report", field=field):
+                report = self._sdcv_report()
+                del report[field]
+                self._assert_schema_invalid_and_consumer_rejects(report)
+
+        case_required = self.schema_contract["$defs"]["case"]["required"]
+        for field in case_required:
+            with self.subTest(scope="case", field=field):
+                report = self._sdcv_report()
+                del report["cases"][0][field]
+                self._assert_schema_invalid_and_consumer_rejects(report)
+
+        report = self._sdcv_report()
+        sentinel = next(
+            case for case in report["cases"] if case["name"] == "sentinel_cmdline"
+        )
+        del sentinel["sentinel_environment_match"]
+        self._assert_schema_invalid_and_consumer_rejects(report)
+
+    def test_schema_invalid_extra_and_malformed_data_are_rejected_in_production(self):
+        extra_report = self._sdcv_report()
+        extra_report["unexpected"] = True
+        extra_case = self._sdcv_report()
+        extra_case["cases"][0]["unexpected"] = True
+        malformed_cases = self._sdcv_report()
+        malformed_cases["cases"] = {"not": "an array"}
+        malformed_parser = self._sdcv_report()
+        malformed_parser["cases"][0]["parser"] = {"unexpected": True}
+
+        for name, report in (
+            ("extra_report", extra_report),
+            ("extra_case", extra_case),
+            ("malformed_cases", malformed_cases),
+            ("malformed_parser", malformed_parser),
+        ):
+            with self.subTest(name=name):
+                self._assert_schema_invalid_and_consumer_rejects(report)
+
+    def test_valid_report_does_not_mask_schema_invalid_report(self):
+        valid = self._sdcv_report()
+        malformed = self._sdcv_report()
+        malformed["unexpected"] = True
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            valid_path = root / "valid.json"
+            malformed_path = root / "malformed.json"
+            valid_path.write_text(json.dumps(valid), encoding="utf-8")
+            malformed_path.write_text(json.dumps(malformed), encoding="utf-8")
+            with self.assertRaises(review_bundle.BundleError):
+                review_bundle.validate_sdcv_gate_reports(
+                    [valid_path, malformed_path]
+                )
+
+    def test_schema_valid_history_and_privacy_mismatches_are_rejected(self):
+        history = self._sdcv_report()
+        history["history_paths"] = ["home/.sdcv_history"]
+        query_in_cmdline = self._sdcv_report()
+        query_in_cmdline["cases"][0]["query_in_cmdline"] = True
+        sentinel_environment = self._sdcv_report()
+        sentinel = next(
+            case
+            for case in sentinel_environment["cases"]
+            if case["name"] == "sentinel_cmdline"
+        )
+        sentinel["sentinel_environment_match"] = True
+
+        for name, report in (
+            ("history_created", history),
+            ("query_in_cmdline", query_in_cmdline),
+            ("query_in_environment", sentinel_environment),
+        ):
+            with self.subTest(name=name):
+                self._assert_schema_valid_and_consumer_rejects(report)
+
+    def test_schema_valid_cap_termination_and_reaping_mismatches_are_rejected(self):
+        mutations = (
+            ("stdout_over_cap", "termination_reason", "timeout"),
+            ("stdout_over_cap", "stdout_bytes", self.STDOUT_CAP_BYTES + 2),
+            ("stdout_over_cap", "stdout_stored_bytes", self.STDOUT_CAP_BYTES - 1),
+            ("stderr_over_cap", "termination_reason", "timeout"),
+            ("stderr_over_cap", "stderr_bytes", self.STDERR_CAP_BYTES + 2),
+            ("stderr_over_cap", "stderr_stored_bytes", self.STDERR_CAP_BYTES - 1),
+            ("source_timeout", "termination_reason", "cancelled"),
+            ("overall_timeout", "returncode", 0),
+            ("cancellation", "process_group_reaped", False),
+            ("exact_hit", "returncode", -9),
+            ("stdout_under_cap_32mib", "stdout_bytes", 32 * 1024 * 1024),
+        )
+        for case_name, field, value in mutations:
+            with self.subTest(case=case_name, field=field):
+                report = self._sdcv_report()
+                case = next(
+                    item for item in report["cases"] if item["name"] == case_name
+                )
+                case[field] = value
+                self._assert_schema_valid_and_consumer_rejects(report)
 
     def test_schema_rejects_malformed_producer_reports(self):
         missing_raw = self._sdcv_report()
