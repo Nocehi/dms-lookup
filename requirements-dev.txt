@@ -1,6 +1,8 @@
-# Exact direct and transitive pins for the release-bundle schema validator.
+# Exact Python 3.11+ direct and transitive release/test dependency pins.
 attrs==26.1.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
+packaging==26.2
 referencing==0.37.0
 rpds-py==2026.6.3
+typing-extensions==4.16.0; python_version < "3.13"

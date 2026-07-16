@@ -155,11 +155,11 @@ last-known-good reload. DMS tokens are mapped only inside the optional wrapper.
 
 ## Tests and benchmarks
 
-On a fresh checkout, create an isolated Python environment and install the
-exact release/test dependency set before running the minimum suite. The same
-`jsonschema` installation is used by the production review-bundle consumer;
-missing or version-skewed dependencies are rejected by the pre-release
-preflight.
+Dank Lookup supports Python 3.11 and newer. On a fresh checkout, create an
+isolated Python environment and install the exact release/test dependency set
+before running the minimum suite. The same `jsonschema` installation is used
+by the production review-bundle consumer; missing, version-skewed, or active
+marker-selected dependencies are rejected by the pre-release preflight.
 
 ```bash
 python3 -m venv /tmp/dank-lookup-venv
@@ -177,6 +177,7 @@ python3 -m unittest -v \
   tests.test_cancellation_full_stack \
   tests.test_cli \
   tests.test_core \
+  tests.test_dependency_preflight \
   tests.test_packaging \
   tests.test_runtime \
   tests.test_selection_latency \

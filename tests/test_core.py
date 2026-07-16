@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -493,6 +494,16 @@ class SdcvBoundedProtocolTests(unittest.TestCase):
             )
 
             self.assertEqual(run["termination_reason"], "stderr_cap")
+            self.assertEqual(run["returncode"], -signal.SIGKILL)
+            self.assertEqual(
+                [
+                    decision
+                    for decision in run["runner_decisions"]
+                    if decision
+                    in {"timeout", "cancelled", "stdout_cap", "stderr_cap", "wait_timeout"}
+                ],
+                ["stderr_cap"],
+            )
             self.assertEqual(run["stderr_stored_bytes"], STDERR_CAP_BYTES)
             self.assertGreater(run["stderr_bytes"], STDERR_CAP_BYTES)
             self.assertLessEqual(run["stderr_bytes"], STDERR_CAP_BYTES + 1)

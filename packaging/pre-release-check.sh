@@ -71,53 +71,8 @@ check_shellcheck() {
 }
 
 check_python_test_dependencies() {
-    python3 - requirements-dev.txt tests/fixtures-sdcv-stdin/evidence-schema.json <<'PY'
-import json
-import pathlib
-import sys
-from importlib.metadata import PackageNotFoundError, version
-
-requirements_path = pathlib.Path(sys.argv[1])
-schema_path = pathlib.Path(sys.argv[2])
-problems = []
-for raw_line in requirements_path.read_text(encoding="utf-8").splitlines():
-    line = raw_line.strip()
-    if not line or line.startswith("#"):
-        continue
-    if line.count("==") != 1:
-        problems.append(f"non-exact requirement: {line}")
-        continue
-    distribution, expected = line.split("==", 1)
-    try:
-        actual = version(distribution)
-    except PackageNotFoundError:
-        problems.append(f"missing {distribution}=={expected}")
-        continue
-    if actual != expected:
-        problems.append(f"{distribution}: expected {expected}, found {actual}")
-
-if not problems:
-    try:
-        from jsonschema import Draft202012Validator
-
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
-            problems.append("sdcv evidence schema does not declare Draft 2020-12")
-        else:
-            Draft202012Validator.check_schema(schema)
-    except Exception as exc:
-        problems.append(f"cannot load Draft 2020-12 validator: {exc}")
-
-if problems:
-    for problem in problems:
-        print(f"dependency preflight: {problem}", file=sys.stderr)
-    print(
-        "install the pinned release/test environment with "
-        "python3 -m pip install --requirement requirements-dev.txt",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-PY
+    python3 packaging/check-python-dependencies.py \
+        requirements-dev.txt tests/fixtures-sdcv-stdin/evidence-schema.json
 }
 
 check_python_syntax() {
@@ -248,7 +203,9 @@ check_install_parity() {
     local fake_home="$TEMP_ROOT/home"
     local fake_config="$TEMP_ROOT/config"
     local fake_data="$TEMP_ROOT/data"
-    mkdir -p "$fake_home" "$fake_config" "$fake_data" || return 1
+    local fake_runtime="$TEMP_ROOT/runtime"
+    mkdir -p "$fake_home" "$fake_config" "$fake_data" "$fake_runtime" || return 1
+    chmod 700 "$fake_runtime" || return 1
 
     HOME="$fake_home" XDG_CONFIG_HOME="$fake_config" XDG_DATA_HOME="$fake_data" \
         packaging/install-user.sh >"$TEMP_ROOT/install-fresh.log" || return 1
@@ -299,6 +256,8 @@ PY
 
     printf '%s' 'fresh install' \
     | HOME="$fake_home" XDG_CONFIG_HOME="$fake_config" XDG_DATA_HOME="$fake_data" \
+        XDG_RUNTIME_DIR="$fake_runtime" \
+        DANK_LOOKUP_BACKEND_IDLE_TIMEOUT=0.1 \
         DANK_LOOKUP_SDCV="$TEMP_ROOT/no-such-sdcv" \
         "$fake_home/.local/bin/dank-lookup" lookup \
         >"$TEMP_ROOT/installed-cli.json" || return 1
@@ -360,6 +319,8 @@ main() {
         fail shellcheck
     fi
     run_check python_test_dependencies check_python_test_dependencies
+    run_check dependency_preflight_tests \
+        python3 -m unittest -v tests.test_dependency_preflight
     run_check python_syntax check_python_syntax
     run_check standalone_no_dms check_standalone_independence
     run_check resident_no_clipboard_read check_resident_clipboard_boundary
@@ -375,7 +336,9 @@ main() {
         -a -f packaging/build-review-bundle.sh \
         -a -f packaging/release_evidence.py \
         -a -f packaging/review-evidence-requirements.json \
+        -a -f packaging/check-python-dependencies.py \
         -a -f requirements-dev.txt \
+        -a -f tests/test_dependency_preflight.py \
         -a -f tests/test_pre_release_fail_fast.sh
 
     echo

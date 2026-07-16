@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import io
 import json
 import os
 import pathlib
+import signal
 import shutil
-import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -28,8 +30,6 @@ except ModuleNotFoundError:
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PACKAGING = ROOT / "packaging"
 sys.path.insert(0, str(PACKAGING))
-
-import importlib.util
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -826,10 +826,12 @@ class SdcvGateEvidenceTests(unittest.TestCase):
             stderr_bytes = self.STDERR_CAP_BYTES + 1
             stderr_stored_bytes = self.STDERR_CAP_BYTES
             runner_decisions = ["stderr_cap"]
+        elif name == "sentinel_cmdline":
+            runner_decisions = ["query_sent"]
         result = {
             "name": name,
             "argv_metadata": ["--json"],
-            "query_bytes": 0,
+            "query_bytes": 56 if name == "sentinel_cmdline" else 0,
             "choice": None,
             "pid": 1234,
             "returncode": returncode,
@@ -872,11 +874,73 @@ class SdcvGateEvidenceTests(unittest.TestCase):
     def _validate_schema(self, report: dict) -> None:
         self.schema_validator.validate(report)
 
+    @staticmethod
+    def _safe_fixture_name(value: object) -> bool:
+        if not isinstance(value, str) or not value:
+            return False
+        relative = pathlib.PurePosixPath(value)
+        return not relative.is_absolute() and len(relative.parts) == 1
+
+    def _write_report_artifacts(self, root: pathlib.Path, report: dict) -> None:
+        cases = report.get("cases")
+        if not isinstance(cases, list):
+            return
+        for case in cases:
+            if not isinstance(case, dict):
+                continue
+            for stream in ("stdout", "stderr"):
+                filename = case.get(f"{stream}_file")
+                size = case.get(f"{stream}_stored_bytes")
+                if not self._safe_fixture_name(filename):
+                    continue
+                if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                    continue
+                path = root / filename
+                with path.open("wb") as handle:
+                    handle.truncate(size)
+            cmdline_file = case.get("cmdline_file")
+            if self._safe_fixture_name(cmdline_file):
+                metadata = case.get("argv_metadata")
+                if not isinstance(metadata, list) or not all(
+                    isinstance(item, str) for item in metadata
+                ):
+                    metadata = []
+                argv = ["/usr/bin/sdcv", *metadata]
+                (root / cmdline_file).write_bytes(
+                    b"\0".join(item.encode("utf-8") for item in argv) + b"\0"
+                )
+
+    def _write_report(
+        self,
+        root: pathlib.Path,
+        report: dict,
+        *,
+        raw_json: str | None = None,
+    ) -> pathlib.Path:
+        root.mkdir(parents=True, exist_ok=True)
+        self._write_report_artifacts(root, report)
+        path = root / "report.json"
+        path.write_text(
+            raw_json
+            if raw_json is not None
+            else json.dumps(report, ensure_ascii=False, allow_nan=False),
+            encoding="utf-8",
+        )
+        return path
+
     def _validate(self, report: dict) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = pathlib.Path(directory) / "report.json"
-            path.write_text(json.dumps(report), encoding="utf-8")
+            path = self._write_report(pathlib.Path(directory), report)
             review_bundle.validate_sdcv_gate_reports([path])
+
+    def _validate_group(self, reports: list[dict]) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            paths = [
+                self._write_report(root / f"report-{index}", report)
+                for index, report in enumerate(reports)
+            ]
+            review_bundle.validate_sdcv_gate_reports(paths)
 
     def _assert_schema_invalid_and_consumer_rejects(self, report: dict) -> None:
         with self.assertRaises(jsonschema.exceptions.ValidationError):
@@ -926,6 +990,37 @@ class SdcvGateEvidenceTests(unittest.TestCase):
         self._validate_schema(report)
         with self.assertRaises(review_bundle.BundleError):
             self._validate(report)
+
+    def test_producer_empty_version_failure_is_schema_valid_but_not_passing(self):
+        report = self._sdcv_report(version_returncode=1, version_raw="")
+        self.assertEqual(report["verdict"], "fail")
+        self.assertEqual(report["sdcv_version"], "")
+        self.assertEqual(report["sdcv_version_raw"], "")
+        self.assertEqual(report["sdcv_version_returncode"], 1)
+        self.assertEqual(
+            report["gate_errors"],
+            ["installed sdcv is not the required 0.5.5 binary"],
+        )
+        self._validate_schema(report)
+        self._validate_group([self._sdcv_report(), report])
+        with self.assertRaisesRegex(review_bundle.BundleError, "no passing"):
+            self._validate(report)
+
+    def test_passing_report_requires_successful_nonempty_exact_version_capture(self):
+        empty_raw = self._sdcv_report()
+        empty_raw["sdcv_version_raw"] = ""
+        self._assert_schema_invalid_and_consumer_rejects(empty_raw)
+
+        for field, value in (
+            ("sdcv_version_returncode", 1),
+            ("sdcv_version", ""),
+        ):
+            with self.subTest(field=field):
+                report = self._sdcv_report()
+                report[field] = value
+                self._validate_schema(report)
+                with self.assertRaises(review_bundle.BundleError):
+                    self._validate(report)
 
     def test_producer_case_failure_matches_schema_and_consumer_rejects(self):
         cases = [self._case(name) for name in self.CASE_NAMES]
@@ -1030,14 +1125,58 @@ class SdcvGateEvidenceTests(unittest.TestCase):
         malformed["unexpected"] = True
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            valid_path = root / "valid.json"
-            malformed_path = root / "malformed.json"
-            valid_path.write_text(json.dumps(valid), encoding="utf-8")
-            malformed_path.write_text(json.dumps(malformed), encoding="utf-8")
+            valid_path = self._write_report(root / "valid", valid)
+            malformed_path = self._write_report(root / "malformed", malformed)
             with self.assertRaises(review_bundle.BundleError):
                 review_bundle.validate_sdcv_gate_reports(
                     [valid_path, malformed_path]
                 )
+
+    def test_valid_pass_does_not_mask_schema_valid_contradictory_failure(self):
+        valid = self._sdcv_report()
+        contradictory = self._sdcv_report()
+        contradictory["verdict"] = "fail"
+        self._validate_schema(contradictory)
+        with self.assertRaises(review_bundle.BundleError):
+            self._validate_group([valid, contradictory])
+
+    def test_coherent_failure_is_validated_before_pass_selection(self):
+        cases = [self._case(name) for name in self.CASE_NAMES]
+        cases[0]["errors"] = ["forced producer failure"]
+        cases[0]["status"] = "fail"
+        failure = probe_sdcv_stdin.build_gate_report(
+            version_returncode=0,
+            version_raw="Console version of Stardict, version 0.5.5",
+            history_paths=[],
+            cases=cases,
+        )
+        self._validate_schema(failure)
+        self._validate_group([self._sdcv_report(), failure])
+        with self.assertRaisesRegex(review_bundle.BundleError, "no passing"):
+            self._validate_group([failure])
+
+    def test_group_rejects_case_status_error_and_gate_error_contradictions(self):
+        status_fail_without_errors = self._sdcv_report()
+        status_fail_without_errors["cases"][0]["status"] = "fail"
+
+        status_pass_with_errors = self._sdcv_report()
+        status_pass_with_errors["cases"][0]["errors"] = ["hidden case failure"]
+
+        wrong_failed_case_name = self._sdcv_report()
+        wrong_failed_case_name["cases"][0]["status"] = "fail"
+        wrong_failed_case_name["cases"][0]["errors"] = ["forced producer failure"]
+        wrong_failed_case_name["verdict"] = "fail"
+        wrong_failed_case_name["gate_errors"] = ["failed cases: exact_miss"]
+
+        for name, contradictory in (
+            ("fail_status_without_errors", status_fail_without_errors),
+            ("pass_status_with_errors", status_pass_with_errors),
+            ("wrong_failed_case_name", wrong_failed_case_name),
+        ):
+            with self.subTest(name=name):
+                self._validate_schema(contradictory)
+                with self.assertRaises(review_bundle.BundleError):
+                    self._validate_group([self._sdcv_report(), contradictory])
 
     def test_schema_valid_history_and_privacy_mismatches_are_rejected(self):
         history = self._sdcv_report()
@@ -1059,6 +1198,152 @@ class SdcvGateEvidenceTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self._assert_schema_valid_and_consumer_rejects(report)
+
+    def test_artifact_binding_rejects_escaping_and_nested_paths(self):
+        for filename in ("../outside.bin", "/tmp/outside.bin", "nested/output.bin"):
+            with self.subTest(filename=filename):
+                report = self._sdcv_report()
+                report["cases"][0]["stdout_file"] = filename
+                self._validate_schema(report)
+                with self.assertRaises(review_bundle.BundleError):
+                    self._validate(report)
+
+    def test_artifact_binding_requires_every_regular_nonsymlink_sibling(self):
+        artifacts = (
+            ("exact_hit", "stdout_file"),
+            ("exact_hit", "stderr_file"),
+            ("sentinel_cmdline", "cmdline_file"),
+        )
+        for case_name, field in artifacts:
+            for kind in ("missing", "symlink", "directory"):
+                with self.subTest(case=case_name, field=field, kind=kind):
+                    report = self._sdcv_report()
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = pathlib.Path(directory)
+                        report_path = self._write_report(root, report)
+                        case = next(
+                            item
+                            for item in report["cases"]
+                            if item["name"] == case_name
+                        )
+                        artifact = root / case[field]
+                        artifact.unlink()
+                        if kind == "symlink":
+                            target = root / "unreferenced-regular.bin"
+                            target.write_bytes(b"target")
+                            artifact.symlink_to(target)
+                        elif kind == "directory":
+                            artifact.mkdir()
+                        with self.assertRaises(review_bundle.BundleError):
+                            review_bundle.validate_sdcv_gate_reports([report_path])
+
+    def test_artifact_binding_matches_recorded_stdout_and_stderr_sizes(self):
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream):
+                report = self._sdcv_report()
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    report_path = self._write_report(root, report)
+                    case = report["cases"][0]
+                    (root / case[f"{stream}_file"]).write_bytes(b"size-drift")
+                    with self.assertRaises(review_bundle.BundleError):
+                        review_bundle.validate_sdcv_gate_reports([report_path])
+
+    def test_artifact_binding_rejects_path_swap_after_open(self):
+        for filename in (
+            "exact_hit.stdout.bin",
+            "sentinel_cmdline.cmdline.bin",
+        ):
+            with self.subTest(filename=filename):
+                report = self._sdcv_report()
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    report_path = self._write_report(root, report)
+                    target = root / filename
+                    real_open = os.open
+                    swapped = False
+
+                    def swap_path_after_open(path, flags, *args):
+                        nonlocal swapped
+                        descriptor = real_open(path, flags, *args)
+                        if pathlib.Path(path) == target and not swapped:
+                            swapped = True
+                            contents = target.read_bytes()
+                            target.unlink()
+                            target.write_bytes(contents)
+                        return descriptor
+
+                    with mock.patch.object(
+                        review_bundle.os, "open", side_effect=swap_path_after_open
+                    ):
+                        with self.assertRaisesRegex(
+                            review_bundle.BundleError,
+                            "artifact changed during validation",
+                        ):
+                            review_bundle.validate_sdcv_gate_reports([report_path])
+                    self.assertTrue(swapped)
+
+    def test_sentinel_cmdline_binding_is_nonempty_exact_and_private(self):
+        mutations = (
+            ("empty", b""),
+            ("metadata_mismatch", b"/usr/bin/sdcv\0--wrong\0"),
+        )
+        for name, contents in mutations:
+            with self.subTest(name=name):
+                report = self._sdcv_report()
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    report_path = self._write_report(root, report)
+                    sentinel = next(
+                        case
+                        for case in report["cases"]
+                        if case["name"] == "sentinel_cmdline"
+                    )
+                    (root / sentinel["cmdline_file"]).write_bytes(contents)
+                    with self.assertRaises(review_bundle.BundleError):
+                        review_bundle.validate_sdcv_gate_reports([report_path])
+
+        report = self._sdcv_report()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            report_path = self._write_report(root, report)
+            sentinel = next(
+                case
+                for case in report["cases"]
+                if case["name"] == "sentinel_cmdline"
+            )
+            (root / sentinel["cmdline_file"]).write_bytes(
+                b"cmdline-" + b"a" * 48 + b"\0--json\0"
+            )
+            with self.assertRaisesRegex(
+                review_bundle.BundleError,
+                "sentinel query appeared in the cmdline capture",
+            ):
+                review_bundle.validate_sdcv_gate_reports([report_path])
+
+    def test_sentinel_requires_expected_query_length_and_query_sent_decision(self):
+        wrong_length = self._sdcv_report()
+        sentinel = next(
+            case for case in wrong_length["cases"] if case["name"] == "sentinel_cmdline"
+        )
+        sentinel["query_bytes"] = 0
+
+        missing_query_sent = self._sdcv_report()
+        sentinel = next(
+            case
+            for case in missing_query_sent["cases"]
+            if case["name"] == "sentinel_cmdline"
+        )
+        sentinel["runner_decisions"] = []
+
+        for name, report in (
+            ("wrong_query_length", wrong_length),
+            ("missing_query_sent", missing_query_sent),
+        ):
+            with self.subTest(name=name):
+                self._validate_schema(report)
+                with self.assertRaises(review_bundle.BundleError):
+                    self._validate(report)
 
     def test_schema_valid_cap_termination_and_reaping_mismatches_are_rejected(self):
         mutations = (
@@ -1082,6 +1367,324 @@ class SdcvGateEvidenceTests(unittest.TestCase):
                 )
                 case[field] = value
                 self._assert_schema_valid_and_consumer_rejects(report)
+
+    def test_terminal_decisions_require_one_coherent_reason_and_sigkill(self):
+        for case_name in review_bundle.SDCV_EXPECTED_TERMINATIONS:
+            with self.subTest(case=case_name, mutation="wrong_signal"):
+                report = self._sdcv_report()
+                case = next(
+                    item for item in report["cases"] if item["name"] == case_name
+                )
+                case["returncode"] = -signal.SIGTERM
+                self._assert_schema_valid_and_consumer_rejects(report)
+
+        conflicting = self._sdcv_report()
+        timeout = next(
+            case for case in conflicting["cases"] if case["name"] == "source_timeout"
+        )
+        timeout["runner_decisions"].append("cancelled")
+        self._assert_schema_valid_and_consumer_rejects(conflicting)
+
+        clean_with_terminal = self._sdcv_report()
+        clean_with_terminal["cases"][0]["runner_decisions"] = ["timeout"]
+        self._assert_schema_valid_and_consumer_rejects(clean_with_terminal)
+
+        duplicate = self._sdcv_report()
+        timeout = next(
+            case for case in duplicate["cases"] if case["name"] == "source_timeout"
+        )
+        timeout["runner_decisions"] = ["timeout", "timeout"]
+        with self.assertRaises(review_bundle.BundleError):
+            review_bundle._validate_sdcv_gate_semantics(duplicate)
+
+    def test_report_parser_rejects_all_nonstandard_nonfinite_json_numbers(self):
+        for token in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(token=token):
+                report = self._sdcv_report()
+                encoded = json.dumps(report, ensure_ascii=False, allow_nan=False)
+                raw = encoded.replace(
+                    '"duration_ms": 1.0', f'"duration_ms": {token}', 1
+                )
+                self.assertNotEqual(raw, encoded)
+                with tempfile.TemporaryDirectory() as directory:
+                    path = self._write_report(
+                        pathlib.Path(directory), report, raw_json=raw
+                    )
+                    with self.assertRaises(review_bundle.BundleError):
+                        review_bundle.validate_sdcv_gate_reports([path])
+
+    def test_report_semantics_require_finite_numeric_values(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                report = self._sdcv_report()
+                report["cases"][0]["duration_ms"] = value
+                with self.assertRaises(review_bundle.BundleError):
+                    review_bundle._validate_sdcv_gate_semantics(report)
+
+        report = self._sdcv_report()
+        review_bundle._validate_sdcv_gate_semantics(report)
+
+    def test_producer_report_serialization_forbids_nonfinite_numbers(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                report = self._sdcv_report()
+                report["cases"][0]["duration_ms"] = value
+                with self.assertRaises(ValueError):
+                    probe_sdcv_stdin.serialize_report(report)
+
+        serialized = probe_sdcv_stdin.serialize_report(self._sdcv_report())
+        self.assertTrue(serialized.endswith("\n"))
+        self.assertEqual(json.loads(serialized)["verdict"], "pass")
+
+    def test_real_production_case_generation_schema_and_consumer_contract(self):
+        child_source = textwrap.dedent(
+            """\
+            #!__PYTHON__
+            import os
+            import sys
+
+            if "--version" in sys.argv:
+                print("Console version of Stardict, version 0.5.5")
+                raise SystemExit(0)
+
+            prompt = "Enter word or phrase: "
+            choice_prompt = "Your choice[-1 to abort]: "
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+
+            import json
+            import time
+
+            query_line = sys.stdin.readline()
+            if query_line == "":
+                sys.stdout.write("\\n")
+                sys.stdout.flush()
+                raise SystemExit(0)
+
+            query = query_line.rstrip("\\n")
+            if query == "giant-over-cap":
+                chunk = b"x" * (1024 * 1024)
+                while True:
+                    os.write(1, chunk)
+            if query == "giant-under-cap":
+                time.sleep(0.10)
+
+            sys.stdout.write(query + "\\n")
+            if "--exact-search" not in sys.argv:
+                sys.stdout.write("[0)DANK_STDIN_A-->word\\n")
+                sys.stdout.write(choice_prompt)
+                sys.stdout.flush()
+                choice = sys.stdin.readline().rstrip("\\n")
+                entries = [
+                    {
+                        "dict": "DANK_STDIN_A",
+                        "word": "word",
+                        "definition": "fixture-a exact english",
+                    }
+                ]
+                sys.stdout.write(choice + "\\n")
+                sys.stdout.write(
+                    json.dumps(
+                        entries, ensure_ascii=False, separators=(",", ":")
+                    )[1:]
+                    + "\\n"
+                )
+            else:
+                dictionaries = [
+                    sys.argv[index + 1]
+                    for index, value in enumerate(sys.argv[:-1])
+                    if value == "--use-dict"
+                ]
+                if query == "definitely-absent" or query.startswith("cmdline-"):
+                    entries = []
+                elif query == "giant-under-cap":
+                    tail = "GIANT-32-COMPLETE-TAIL"
+                    definition = "x" * (32 * 1024 * 1024 - len(tail)) + tail
+                    entries = [
+                        {
+                            "dict": "DANK_STDIN_GIANT32",
+                            "word": query,
+                            "definition": definition,
+                        }
+                    ]
+                elif dictionaries == ["DANK_STDIN_B"]:
+                    entries = [
+                        {
+                            "dict": "DANK_STDIN_B",
+                            "word": query,
+                            "definition": "fixture-b exact english",
+                        }
+                    ]
+                elif dictionaries == ["DANK_STDIN_A", "DANK_STDIN_B"]:
+                    entries = [
+                        {
+                            "dict": "DANK_STDIN_A",
+                            "word": query,
+                            "definition": "fixture-a exact english",
+                        },
+                        {
+                            "dict": "DANK_STDIN_B",
+                            "word": query,
+                            "definition": "fixture-b exact english",
+                        },
+                    ]
+                else:
+                    definitions = {
+                        "word": "fixture-a exact english",
+                        "漢字": "fixture-a han unicode",
+                        "かな": "fixture-a ja unicode",
+                        "粵語": "fixture-a yue unicode",
+                    }
+                    entries = [
+                        {
+                            "dict": "DANK_STDIN_A",
+                            "word": query,
+                            "definition": definitions[query],
+                        }
+                    ]
+                sys.stdout.write(
+                    json.dumps(
+                        entries, ensure_ascii=False, separators=(",", ":")
+                    )
+                    + "\\n"
+                )
+            sys.stdout.write(prompt + "\\n")
+            sys.stdout.flush()
+            sys.stdin.read()
+            """
+        ).replace("__PYTHON__", sys.executable)
+        expected_case_fields = {
+            "name",
+            "argv_metadata",
+            "query_bytes",
+            "choice",
+            "pid",
+            "returncode",
+            "duration_ms",
+            "termination_reason",
+            "stdout_bytes",
+            "stdout_stored_bytes",
+            "stderr_bytes",
+            "stderr_stored_bytes",
+            "stdout_cap_bytes",
+            "stderr_cap_bytes",
+            "stdout_file",
+            "stderr_file",
+            "cmdline_file",
+            "query_in_cmdline",
+            "main_prompt_count",
+            "choice_prompt_count",
+            "process_group_reaped",
+            "runner_decisions",
+            "errors",
+            "status",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            evidence_dir = root / "bound-evidence"
+            child = root / "hermetic-sdcv"
+            child.write_text(child_source, encoding="utf-8")
+            child.chmod(0o755)
+
+            def empty_fixture_tree(fixture_root, *, include_giant=False):
+                self.assertTrue(include_giant)
+                data_root = fixture_root / "empty-stardict"
+                data_root.mkdir()
+                return data_root
+
+            output = io.StringIO()
+            with mock.patch.object(
+                probe_sdcv_stdin,
+                "build_fixture_tree",
+                side_effect=empty_fixture_tree,
+            ), mock.patch("sys.stdout", output):
+                returncode = probe_sdcv_stdin.main(
+                    [
+                        "--sdcv",
+                        str(child),
+                        "--evidence-dir",
+                        str(evidence_dir),
+                    ]
+                )
+            self.assertEqual(returncode, 0, output.getvalue())
+            self.assertIn("SDCV_STDIN_GATE: PASS", output.getvalue())
+
+            report_path = evidence_dir / "report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            cases = report["cases"]
+            self.assertEqual(
+                [case["name"] for case in cases], list(self.CASE_NAMES)
+            )
+            for case in cases:
+                self.assertEqual(
+                    set(case) - {"parser", "sentinel_environment_match"},
+                    expected_case_fields,
+                )
+                self.assertEqual(
+                    case["stdout_file"], f"{case['name']}.stdout.bin"
+                )
+                self.assertEqual(
+                    case["stderr_file"], f"{case['name']}.stderr.bin"
+                )
+                for stream in ("stdout", "stderr"):
+                    artifact = evidence_dir / case[f"{stream}_file"]
+                    self.assertTrue(artifact.is_file())
+                    self.assertFalse(artifact.is_symlink())
+                    self.assertEqual(
+                        artifact.stat().st_size,
+                        case[f"{stream}_stored_bytes"],
+                    )
+                expected_cmdline = (
+                    "sentinel_cmdline.cmdline.bin"
+                    if case["name"] == "sentinel_cmdline"
+                    else None
+                )
+                self.assertEqual(case["cmdline_file"], expected_cmdline)
+                self.assertEqual(case["errors"], [])
+                self.assertEqual(case["status"], "pass")
+
+            exact_hit = cases[0]
+            sentinel = cases[-1]
+            by_name = {case["name"]: case for case in cases}
+            self.assertEqual(exact_hit["query_bytes"], 4)
+            self.assertEqual(exact_hit["returncode"], 0)
+            self.assertIsNone(exact_hit["termination_reason"])
+            self.assertEqual(
+                exact_hit["runner_decisions"], ["query_sent", "stdin_closed"]
+            )
+            self.assertEqual(sentinel["query_bytes"], 56)
+            self.assertEqual(
+                sentinel["cmdline_file"], "sentinel_cmdline.cmdline.bin"
+            )
+            self.assertEqual(sentinel["runner_decisions"].count("query_sent"), 1)
+            self.assertIs(sentinel["query_in_cmdline"], False)
+            self.assertIs(sentinel["sentinel_environment_match"], False)
+            cmdline = (evidence_dir / sentinel["cmdline_file"]).read_bytes()
+            self.assertTrue(cmdline)
+            self.assertNotIn(b"cmdline-", cmdline)
+
+            under_cap = by_name["stdout_under_cap_32mib"]
+            self.assertGreater(under_cap["stdout_bytes"], 32 * 1024 * 1024)
+            self.assertLess(under_cap["stdout_bytes"], self.STDOUT_CAP_BYTES)
+            for name, reason, cap, stream in (
+                ("stdout_over_cap", "stdout_cap", self.STDOUT_CAP_BYTES, "stdout"),
+                ("stderr_over_cap", "stderr_cap", self.STDERR_CAP_BYTES, "stderr"),
+            ):
+                case = by_name[name]
+                self.assertEqual(case["termination_reason"], reason)
+                self.assertEqual(case["returncode"], -signal.SIGKILL)
+                self.assertEqual(case[f"{stream}_bytes"], cap + 1)
+                self.assertEqual(case[f"{stream}_stored_bytes"], cap)
+            for name, reason in (
+                ("source_timeout", "timeout"),
+                ("overall_timeout", "timeout"),
+                ("cancellation", "cancelled"),
+            ):
+                case = by_name[name]
+                self.assertEqual(case["termination_reason"], reason)
+                self.assertEqual(case["returncode"], -signal.SIGKILL)
+            self._validate_schema(report)
+            review_bundle.validate_sdcv_gate_reports([report_path])
 
     def test_schema_rejects_malformed_producer_reports(self):
         missing_raw = self._sdcv_report()

@@ -7,12 +7,14 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 import os
 import pathlib
 import platform
 import re
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -65,6 +67,19 @@ SDCV_EXPECTED_TERMINATIONS = {
     "stdout_over_cap": "stdout_cap",
     "stderr_over_cap": "stderr_cap",
 }
+SDCV_TERMINAL_DECISIONS = frozenset(
+    {
+        "timeout",
+        "cancelled",
+        "stdout_cap",
+        "stderr_cap",
+        "wait_timeout",
+        "runner_error",
+    }
+)
+SDCV_SENTINEL_QUERY_BYTES = 56
+SDCV_VERSION_ERROR = "installed sdcv is not the required 0.5.5 binary"
+SDCV_HISTORY_ERROR = "sdcv history files were created"
 SDCV_VERSION_PATTERN = re.compile(
     r"\bversion\s+(\d+(?:\.\d+){2})(?![A-Za-z0-9_.+-])", re.IGNORECASE
 )
@@ -124,10 +139,17 @@ def missing_evidence_groups(
     return sorted(missing)
 
 
+def _reject_nonfinite_json_constant(value: str) -> object:
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
 def _load_json(path: pathlib.Path) -> dict:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
         raise BundleError(f"invalid JSON evidence type: {path.name}") from exc
     if not isinstance(value, dict):
         raise BundleError(f"invalid JSON evidence shape: {path.name}")
@@ -179,10 +201,27 @@ def _validate_sdcv_gate_schema(report: dict) -> None:
         ) from exc
 
 
+def _validate_finite_json_numbers(value: object, location: str = "<root>") -> None:
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise BundleError(
+                "invalid sdcv 0.5.5 stdin gate evidence: "
+                f"non-finite number at {location}"
+            )
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _validate_finite_json_numbers(item, f"{location}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_finite_json_numbers(item, f"{location}.{index}")
+
+
 def _validate_sdcv_gate_semantics(report: dict) -> None:
     def reject(reason: str) -> None:
         raise BundleError(f"invalid sdcv 0.5.5 stdin gate evidence: {reason}")
 
+    _validate_finite_json_numbers(report)
     cases = report["cases"]
     raw_version = report.get("sdcv_version_raw")
     version_match = (
@@ -190,23 +229,25 @@ def _validate_sdcv_gate_semantics(report: dict) -> None:
         if isinstance(raw_version, str)
         else None
     )
-    if not all(
-        (
-            report.get("schema_version") == SDCV_GATE_SCHEMA_VERSION,
-            report.get("kind") == SDCV_GATE_KIND,
-            report.get("verdict") == "pass",
-            report.get("sdcv_version") == SDCV_REQUIRED_VERSION,
-            version_match is not None
-            and version_match.group(1) == SDCV_REQUIRED_VERSION,
-            report.get("gate_errors") == [],
-            report.get("stdout_cap_bytes") == SDCV_STDOUT_CAP_BYTES,
-            report.get("stderr_cap_bytes") == SDCV_STDERR_CAP_BYTES,
-            report.get("history_environment")
-            == {"SDCV_HISTFILE": "/dev/null", "SDCV_HISTSIZE": "0"},
-            report.get("history_paths") == [],
-        )
-    ):
-        reject("top-level verdict, version, cap, or history mismatch")
+    normalized_version = version_match.group(1) if version_match is not None else ""
+    version_returncode = report.get("sdcv_version_returncode")
+    if isinstance(version_returncode, bool) or not isinstance(version_returncode, int):
+        reject("sdcv version return code is not an integer")
+    if report.get("schema_version") != SDCV_GATE_SCHEMA_VERSION:
+        reject("wrong schema version")
+    if report.get("kind") != SDCV_GATE_KIND:
+        reject("wrong report kind")
+    if report.get("sdcv_version") != normalized_version:
+        reject("normalized sdcv version does not match raw output")
+    if report.get("stdout_cap_bytes") != SDCV_STDOUT_CAP_BYTES:
+        reject("wrong top-level stdout cap")
+    if report.get("stderr_cap_bytes") != SDCV_STDERR_CAP_BYTES:
+        reject("wrong top-level stderr cap")
+    if report.get("history_environment") != {
+        "SDCV_HISTFILE": "/dev/null",
+        "SDCV_HISTSIZE": "0",
+    }:
+        reject("wrong history environment")
 
     case_names = [case["name"] for case in cases]
     if len(case_names) != len(SDCV_REQUIRED_CASES):
@@ -218,12 +259,16 @@ def _validate_sdcv_gate_semantics(report: dict) -> None:
 
     for case in cases:
         name = case["name"]
-        if case["status"] != "pass" or case["errors"] != []:
-            reject(f"{name} is not a clean passing case")
+        errors = case["errors"]
+        if any(not error.strip() for error in errors):
+            reject(f"{name} contains an empty case error")
+        expected_status = "pass" if not errors else "fail"
+        if case["status"] != expected_status:
+            reject(f"{name} status does not match its case errors")
+        if len(set(case["runner_decisions"])) != len(case["runner_decisions"]):
+            reject(f"{name} contains duplicate runner decisions")
         if case["query_in_cmdline"] is not False:
             reject(f"{name} exposed the query in argv")
-        if case["process_group_reaped"] is not True:
-            reject(f"{name} did not reap its process group")
         if case["stdout_cap_bytes"] != SDCV_STDOUT_CAP_BYTES:
             reject(f"{name} has the wrong stdout cap")
         if case["stderr_cap_bytes"] != SDCV_STDERR_CAP_BYTES:
@@ -237,32 +282,69 @@ def _validate_sdcv_gate_semantics(report: dict) -> None:
             stored = case[f"{stream}_stored_bytes"]
             if stored != min(observed, cap):
                 reject(f"{name} has inconsistent {stream} stored bytes")
-            over_cap_name = f"{stream}_over_cap"
-            if name == over_cap_name:
-                if observed != cap + 1 or stored != cap:
-                    reject(f"{name} does not stop at cap plus sentinel")
-            elif observed > cap:
-                reject(f"{name} exceeded its {stream} cap")
 
-        expected_termination = SDCV_EXPECTED_TERMINATIONS.get(name)
-        if case["termination_reason"] != expected_termination:
-            reject(f"{name} has the wrong termination reason")
+        termination_reason = case["termination_reason"]
         returncode = case["returncode"]
-        if expected_termination is None:
-            if returncode != 0:
-                reject(f"{name} did not exit cleanly")
+        terminal_decisions = [
+            decision
+            for decision in case["runner_decisions"]
+            if decision in SDCV_TERMINAL_DECISIONS
+        ]
+        if termination_reason is None:
+            if terminal_decisions:
+                reject(f"{name} records a terminal decision without termination")
+            if returncode < 0:
+                reject(f"{name} has a negative return code without signal provenance")
         else:
-            if returncode >= 0:
-                reject(f"{name} was not signal-terminated")
-            if expected_termination not in case["runner_decisions"]:
-                reject(f"{name} lacks its termination decision")
-        if name == "cancellation" and "query_sent" not in case["runner_decisions"]:
-            reject("cancellation happened before the query was sent")
+            if terminal_decisions != [termination_reason]:
+                reject(f"{name} has conflicting or duplicate terminal decisions")
+            if returncode != -signal.SIGKILL:
+                reject(f"{name} does not prove SIGKILL termination")
+
+        if case["status"] == "pass":
+            if case["process_group_reaped"] is not True:
+                reject(f"{name} did not reap its process group")
+            for stream, cap in (
+                ("stdout", SDCV_STDOUT_CAP_BYTES),
+                ("stderr", SDCV_STDERR_CAP_BYTES),
+            ):
+                observed = case[f"{stream}_bytes"]
+                stored = case[f"{stream}_stored_bytes"]
+                over_cap_name = f"{stream}_over_cap"
+                if name == over_cap_name:
+                    if observed != cap + 1 or stored != cap:
+                        reject(f"{name} does not stop at cap plus sentinel")
+                elif observed > cap:
+                    reject(f"{name} exceeded its {stream} cap")
+
+            expected_termination = SDCV_EXPECTED_TERMINATIONS.get(name)
+            if termination_reason != expected_termination:
+                reject(f"{name} has the wrong termination reason")
+            if expected_termination is None and returncode != 0:
+                reject(f"{name} did not exit cleanly")
+            if name == "cancellation" and "query_sent" not in case["runner_decisions"]:
+                reject("cancellation happened before the query was sent")
+
+    expected_gate_errors = []
+    if version_returncode != 0 or normalized_version != SDCV_REQUIRED_VERSION:
+        expected_gate_errors.append(SDCV_VERSION_ERROR)
+    if report["history_paths"]:
+        expected_gate_errors.append(SDCV_HISTORY_ERROR)
+    failed_cases = [case["name"] for case in cases if case["status"] != "pass"]
+    if failed_cases:
+        expected_gate_errors.append("failed cases: " + ", ".join(failed_cases))
+    if report["gate_errors"] != expected_gate_errors:
+        reject("gate errors do not match report failures")
+    expected_verdict = "pass" if not expected_gate_errors else "fail"
+    if report["verdict"] != expected_verdict:
+        reject("verdict does not match gate errors")
 
     under_cap = next(
         case for case in cases if case["name"] == "stdout_under_cap_32mib"
     )
-    if not (32 * 1024 * 1024 < under_cap["stdout_bytes"] < SDCV_STDOUT_CAP_BYTES):
+    if under_cap["status"] == "pass" and not (
+        32 * 1024 * 1024 < under_cap["stdout_bytes"] < SDCV_STDOUT_CAP_BYTES
+    ):
         reject("32 MiB case does not prove bounded under-cap output")
 
     sentinel = next(case for case in cases if case["name"] == "sentinel_cmdline")
@@ -270,22 +352,233 @@ def _validate_sdcv_gate_semantics(report: dict) -> None:
         reject("sentinel query appeared in the environment")
     if not isinstance(sentinel.get("cmdline_file"), str):
         reject("sentinel cmdline capture is missing")
+    if sentinel.get("query_bytes") != SDCV_SENTINEL_QUERY_BYTES:
+        reject("sentinel query has the wrong byte length")
+    if sentinel["runner_decisions"].count("query_sent") != 1:
+        reject("sentinel query was not sent exactly once")
 
 
-def validate_sdcv_gate_report(report: dict) -> None:
+def _bound_sdcv_artifact(
+    report_path: pathlib.Path,
+    *,
+    case_name: str,
+    recorded_name: object,
+    expected_name: str,
+) -> tuple[pathlib.Path, os.stat_result]:
+    if recorded_name != expected_name:
+        raise BundleError(
+            "invalid sdcv 0.5.5 stdin gate evidence: "
+            f"{case_name} has the wrong artifact filename"
+        )
+    relative = pathlib.PurePath(expected_name)
+    if (
+        relative.is_absolute()
+        or len(relative.parts) != 1
+        or relative.name != expected_name
+    ):
+        raise BundleError(
+            "invalid sdcv 0.5.5 stdin gate evidence: "
+            f"{case_name} artifact path escapes its report directory"
+        )
+    artifact_path = report_path.parent / expected_name
+    try:
+        metadata = artifact_path.lstat()
+    except OSError as exc:
+        raise BundleError(
+            "invalid sdcv 0.5.5 stdin gate evidence: "
+            f"{case_name} artifact is missing: {expected_name}"
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise BundleError(
+            "invalid sdcv 0.5.5 stdin gate evidence: "
+            f"{case_name} artifact is a symlink: {expected_name}"
+        )
+    if not stat.S_ISREG(metadata.st_mode):
+        raise BundleError(
+            "invalid sdcv 0.5.5 stdin gate evidence: "
+            f"{case_name} artifact is not regular: {expected_name}"
+        )
+    return artifact_path, metadata
+
+
+def _open_bound_sdcv_artifact(
+    artifact_path: pathlib.Path, metadata: os.stat_result
+) -> tuple[int, os.stat_result]:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(artifact_path, flags)
+    except OSError as exc:
+        raise BundleError(
+            "invalid sdcv 0.5.5 stdin gate evidence: "
+            f"cannot open bound artifact: {artifact_path.name}"
+        ) from exc
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_dev != metadata.st_dev
+        or opened.st_ino != metadata.st_ino
+        or opened.st_size != metadata.st_size
+    ):
+        os.close(descriptor)
+        raise BundleError(
+            "invalid sdcv 0.5.5 stdin gate evidence: "
+            f"artifact changed during validation: {artifact_path.name}"
+        )
+    return descriptor, opened
+
+
+def _confirm_bound_sdcv_artifact_path(
+    artifact_path: pathlib.Path, opened: os.stat_result
+) -> None:
+    try:
+        current = artifact_path.lstat()
+    except OSError as exc:
+        raise BundleError(
+            "invalid sdcv 0.5.5 stdin gate evidence: "
+            f"artifact changed during validation: {artifact_path.name}"
+        ) from exc
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or stat.S_ISLNK(current.st_mode)
+        or current.st_dev != opened.st_dev
+        or current.st_ino != opened.st_ino
+        or current.st_size != opened.st_size
+    ):
+        raise BundleError(
+            "invalid sdcv 0.5.5 stdin gate evidence: "
+            f"artifact changed during validation: {artifact_path.name}"
+        )
+
+
+def _read_bound_sdcv_artifact(
+    artifact_path: pathlib.Path, metadata: os.stat_result
+) -> bytes:
+    descriptor, opened = _open_bound_sdcv_artifact(artifact_path, metadata)
+    try:
+        chunks = []
+        while chunk := os.read(descriptor, 64 * 1024):
+            chunks.append(chunk)
+        content = b"".join(chunks)
+        closed_over = os.fstat(descriptor)
+        if (
+            closed_over.st_dev != metadata.st_dev
+            or closed_over.st_ino != metadata.st_ino
+            or closed_over.st_size != metadata.st_size
+            or len(content) != metadata.st_size
+        ):
+            raise BundleError(
+                "invalid sdcv 0.5.5 stdin gate evidence: "
+                f"artifact changed while reading: {artifact_path.name}"
+            )
+        _confirm_bound_sdcv_artifact_path(artifact_path, closed_over)
+        return content
+    finally:
+        os.close(descriptor)
+
+
+def _validate_sdcv_gate_artifacts(report: dict, report_path: pathlib.Path) -> None:
+    for case in report["cases"]:
+        name = case["name"]
+        for stream in ("stdout", "stderr"):
+            expected_name = f"{name}.{stream}.bin"
+            artifact_path, metadata = _bound_sdcv_artifact(
+                report_path,
+                case_name=name,
+                recorded_name=case[f"{stream}_file"],
+                expected_name=expected_name,
+            )
+            descriptor, opened = _open_bound_sdcv_artifact(
+                artifact_path, metadata
+            )
+            try:
+                if opened.st_size != case[f"{stream}_stored_bytes"]:
+                    raise BundleError(
+                        "invalid sdcv 0.5.5 stdin gate evidence: "
+                        f"{name} {stream} artifact size does not match the report"
+                    )
+                _confirm_bound_sdcv_artifact_path(artifact_path, opened)
+            finally:
+                os.close(descriptor)
+
+        expected_cmdline_name = (
+            f"{name}.cmdline.bin" if name == "sentinel_cmdline" else None
+        )
+        if case["cmdline_file"] != expected_cmdline_name:
+            raise BundleError(
+                "invalid sdcv 0.5.5 stdin gate evidence: "
+                f"{name} has the wrong cmdline artifact filename"
+            )
+        if expected_cmdline_name is None:
+            continue
+
+        cmdline_path, metadata = _bound_sdcv_artifact(
+            report_path,
+            case_name=name,
+            recorded_name=case["cmdline_file"],
+            expected_name=expected_cmdline_name,
+        )
+        if metadata.st_size == 0:
+            raise BundleError(
+                "invalid sdcv 0.5.5 stdin gate evidence: "
+                "sentinel cmdline capture is empty"
+            )
+        cmdline = _read_bound_sdcv_artifact(cmdline_path, metadata)
+        if not cmdline:
+            raise BundleError(
+                "invalid sdcv 0.5.5 stdin gate evidence: "
+                "sentinel cmdline capture is empty"
+            )
+        if b"cmdline-" in cmdline:
+            raise BundleError(
+                "invalid sdcv 0.5.5 stdin gate evidence: "
+                "sentinel query appeared in the cmdline capture"
+            )
+        argv_parts = cmdline.split(b"\0")
+        if argv_parts and argv_parts[-1] == b"":
+            argv_parts.pop()
+        if not argv_parts or not argv_parts[0] or any(not part for part in argv_parts):
+            raise BundleError(
+                "invalid sdcv 0.5.5 stdin gate evidence: "
+                "sentinel cmdline has no nonempty executable"
+            )
+        try:
+            decoded_argv = [part.decode("utf-8") for part in argv_parts]
+        except UnicodeDecodeError as exc:
+            raise BundleError(
+                "invalid sdcv 0.5.5 stdin gate evidence: "
+                "sentinel cmdline is not UTF-8"
+            ) from exc
+        recorded_metadata = case["argv_metadata"]
+        if (
+            len(decoded_argv) <= len(recorded_metadata)
+            or decoded_argv[-len(recorded_metadata) :] != recorded_metadata
+        ):
+            raise BundleError(
+                "invalid sdcv 0.5.5 stdin gate evidence: "
+                "sentinel cmdline argv tail does not match report metadata"
+            )
+
+
+def validate_sdcv_gate_report(
+    report: dict, report_path: pathlib.Path | None = None
+) -> None:
     _validate_sdcv_gate_schema(report)
     _validate_sdcv_gate_semantics(report)
+    if report_path is not None:
+        _validate_sdcv_gate_artifacts(report, report_path)
 
 
 def validate_sdcv_gate_reports(paths: Iterable[pathlib.Path]) -> None:
-    sdcv_reports = [_load_json(path) for path in paths]
     valid_sdcv_report = False
-    for report in sdcv_reports:
-        _validate_sdcv_gate_schema(report)
-        if report.get("verdict") != "pass":
-            continue
-        _validate_sdcv_gate_semantics(report)
-        valid_sdcv_report = True
+    for path in paths:
+        report = _load_json(path)
+        validate_sdcv_gate_report(report, path)
+        if report.get("verdict") == "pass":
+            valid_sdcv_report = True
     if not valid_sdcv_report:
         raise BundleError("sdcv gate evidence has no passing 0.5.5 verdict")
 

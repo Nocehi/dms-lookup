@@ -10,6 +10,7 @@
     "verdict",
     "sdcv_version",
     "sdcv_version_raw",
+    "sdcv_version_returncode",
     "stdout_cap_bytes",
     "stderr_cap_bytes",
     "history_environment",
@@ -22,7 +23,8 @@
     "kind": {"const": "sdcv_0_5_5_stdin_feasibility_gate"},
     "verdict": {"enum": ["pass", "fail"]},
     "sdcv_version": {"type": "string"},
-    "sdcv_version_raw": {"type": "string", "minLength": 1},
+    "sdcv_version_raw": {"type": "string"},
+    "sdcv_version_returncode": {"type": "integer"},
     "stdout_cap_bytes": {"const": 67108864},
     "stderr_cap_bytes": {"const": 1048576},
     "history_environment": {
@@ -39,7 +41,11 @@
       "uniqueItems": true,
       "items": {"type": "string", "minLength": 1}
     },
-    "gate_errors": {"type": "array", "items": {"type": "string"}},
+    "gate_errors": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
     "cases": {
       "type": "array",
       "minItems": 18,
@@ -67,6 +73,19 @@
       ]
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"verdict": {"const": "pass"}},
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "sdcv_version_raw": {"minLength": 1}
+        }
+      }
+    }
+  ],
   "$defs": {
     "case": {
       "type": "object",
@@ -148,11 +167,16 @@
         "process_group_reaped": {"type": "boolean"},
         "runner_decisions": {
           "type": "array",
-          "items": {"type": "string"}
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
         },
         "parser": {"$ref": "#/$defs/parser"},
         "sentinel_environment_match": {"type": "boolean"},
-        "errors": {"type": "array", "items": {"type": "string"}},
+        "errors": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
         "status": {"enum": ["pass", "fail"]}
       },
       "allOf": [
