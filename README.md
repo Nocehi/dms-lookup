@@ -116,7 +116,11 @@ or sharing any data. In particular, this project does not bundle words.hk,
 XDICT, reader.dict, or any dictionary whose exact artifact/license chain has
 not been admitted.
 
-The optional Rust tokenizer remains supported when separately installed. A
+The optional Rust tokenizer is built and installed as a managed file with
+`bash packaging/install-user.sh --with-tokenizer` (needs `cargo`), or from an
+existing build with `--tokenizer-bin PATH`. It reads the query on stdin; the
+v0.7.1 positional-text build is not compatible, and the installer warns
+loudly when it finds one (lookups then report `tokenizer_incompatible`). A
 fresh install also has a dependency-free, explicitly non-linguistic script/
 bigram fallback, capped at 24 tokens and identified in the result metadata; it
 does not pretend to be complete Chinese or Japanese language identification.

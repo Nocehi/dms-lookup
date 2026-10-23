@@ -1912,6 +1912,52 @@ class PackagingMatrixTests(unittest.TestCase):
             for relative in entries:
                 self.assertFalse((self.roots[root_key] / relative).exists())
 
+    def _fake_tokenizer(self, name: str, *, speaks_stdin: bool) -> pathlib.Path:
+        path = self.base / name
+        if speaks_stdin:
+            body = "#!/bin/sh\ncat >/dev/null\nprintf '{\"tokens\":[\"測\",\"試\"]}\\n'\n"
+        else:
+            body = "#!/bin/sh\nprintf 'unknown option: --stdin\\n' >&2\n"
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def test_tokenizer_bin_is_installed_managed_preserved_and_uninstalled(self):
+        tokenizer = self._fake_tokenizer("new-tokenize", speaks_stdin=True)
+        self.run_script("install-user.sh", "--tokenizer-bin", str(tokenizer))
+        installed = self.roots["app_lib"] / "dank-lookup-tokenize"
+        manifest = managed_files.load_manifest(self.manifest_path)
+        self.assertIn("dank-lookup-tokenize", manifest["roots"]["app_lib"])
+        self.assertEqual(installed.read_bytes(), tokenizer.read_bytes())
+        # A plain reinstall keeps the managed tokenizer.
+        run = self.run_script("install-user.sh")
+        self.assertTrue(installed.is_file())
+        self.assertNotIn("incompatible tokenizer", run.stderr)
+        self.assertIn("dank-lookup-tokenize", managed_files.load_manifest(self.manifest_path)["roots"]["app_lib"])
+        self.run_script("uninstall-user.sh")
+        self.assertFalse(installed.exists())
+
+    def test_unmanaged_old_tokenizer_is_kept_and_reported_loudly(self):
+        old = self._fake_tokenizer("old-tokenize", speaks_stdin=False)
+        installed = self.roots["app_lib"] / "dank-lookup-tokenize"
+        installed.parent.mkdir(parents=True)
+        installed.write_bytes(old.read_bytes())
+        installed.chmod(0o755)
+        run = self.run_script("install-user.sh")
+        self.assertIn("incompatible tokenizer", run.stderr)
+        self.assertEqual(installed.read_bytes(), old.read_bytes())
+        self.assertNotIn("dank-lookup-tokenize", managed_files.load_manifest(self.manifest_path)["roots"]["app_lib"])
+        new = self._fake_tokenizer("new-tokenize", speaks_stdin=True)
+        refused = self.run_script("install-user.sh", "--tokenizer-bin", str(new), expected=1)
+        self.assertIn("refusing to overwrite unmanaged tokenizer", refused.stderr)
+        self.assertEqual(installed.read_bytes(), old.read_bytes())
+
+    def test_tokenizer_bin_without_stdin_cli_is_rejected_before_install(self):
+        old = self._fake_tokenizer("old-tokenize", speaks_stdin=False)
+        run = self.run_script("install-user.sh", "--tokenizer-bin", str(old), expected=1)
+        self.assertIn("does not answer the stdin CLI", run.stderr)
+        self.assertFalse(self.manifest_path.exists())
+
     def test_manifest_upgrade_removes_old_new_and_preserves_dms_scope(self):
         manifest = self.install(with_dms=True)
         removed_qml = self.roots["quickshell"] / "qml/RemovedManaged.qml"
