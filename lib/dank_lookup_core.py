@@ -40,6 +40,7 @@ MAX_QUERY_CHARS = 4096
 TOKENIZER_STDOUT_CAP_BYTES = 1024 * 1024
 TOKENIZER_STDERR_CAP_BYTES = 1024 * 1024
 MAX_HOMOGRAPH_CHOICES = 8
+INCOMPLETE_SOURCE_WARNINGS = frozenset({"lookup_budget_exhausted", "sdcv_source_timeout"})
 # Four UTF-8 bytes per Unicode scalar keeps every inline body within the CLI's
 # 8 MiB open-text stdin limit. Larger complete bodies must use open-ref.
 MAX_INLINE_FULL_CHARS = 2 * 1024 * 1024
@@ -935,6 +936,7 @@ def _lookup_modes(
         for source in eligible_installed_sources:
             if getattr(client, "budget_exhausted", False):
                 warnings.add("lookup_budget_exhausted")
+                mode_status[mode_key]["incomplete"] = True
                 break
             name = str(source.get("name", ""))
             exact_only = source_exact_only(source)
@@ -942,6 +944,8 @@ def _lookup_modes(
             entries, warning = client.query(source, query)
             if warning:
                 warnings.add(warning)
+                if warning in INCOMPLETE_SOURCE_WARNINGS:
+                    mode_status[mode_key]["incomplete"] = True
             for entry in entries:
                 item = dict(entry)
                 item.setdefault("dict", name)
@@ -980,6 +984,9 @@ def _lookup_modes(
 
     installed_modes = [key for key, status in mode_status.items() if status["available"]]
     unavailable_modes = [key for key, status in mode_status.items() if not status["available"]]
+    # Modes whose sources were cut short (time budget or per-source timeout)
+    # must stay visible instead of silently disappearing from the result.
+    incomplete_modes = [key for key in candidates if mode_status.get(key, {}).get("incomplete")]
     available_modes = [key for key in candidates if key in results_by_mode]
     ranked_modes = sorted(
         available_modes,
@@ -990,6 +997,7 @@ def _lookup_modes(
             "candidate_modes": candidates,
             "installed_modes": installed_modes,
             "unavailable_modes": unavailable_modes,
+            "incomplete_modes": incomplete_modes,
             "available_modes": available_modes,
             "default_mode": ranked_modes[0] if ranked_modes else None,
             "results_by_mode": results_by_mode,
@@ -1250,6 +1258,7 @@ def lookup(
             for key, mode in config.get("modes", {}).items()
             if isinstance(mode, Mapping) and mode.get("enabled", True)
         ],
+        "incomplete_modes": [],
         "available_modes": [],
         "default_mode": None,
         "results_by_mode": {},

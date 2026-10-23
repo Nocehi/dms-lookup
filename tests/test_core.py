@@ -411,6 +411,7 @@ class ProductionTimeoutBoundaryTests(unittest.TestCase):
             self.assertLess(elapsed, 0.8)
             self.assertEqual(result["error"]["code"], "lookup_timeout")
             self.assertIn("lookup_budget_exhausted", result["warnings"])
+            self.assertEqual(result["incomplete_modes"], ["en"])
             self.assertEqual(len(call_log.read_text(encoding="utf-8").splitlines()), 2)
 
     def test_result_returned_after_overall_deadline_is_rejected(self):

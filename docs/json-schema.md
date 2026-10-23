@@ -78,6 +78,7 @@ fallback; fresh configs explicitly set `exact_only`.
 | `candidate_modes` | string[] | Legal configured modes for the detected features, before result filtering. |
 | `installed_modes` | string[] | Modes with at least one detected local source. |
 | `unavailable_modes` | string[] | Configured modes with no detected local source. |
+| `incomplete_modes` | string[] | Candidate modes whose sources were cut short by the lookup budget or a source timeout; results for them may be missing. |
 | `available_modes` | string[] | Candidate modes that returned an exact result. All are retained for manual switching. |
 | `default_mode` | string or null | Ranked preference among available modes; Kana and strong Cantonese markers are boosts, not exclusion rules. |
 | `results_by_mode` | object | Exact results keyed by mode id. |

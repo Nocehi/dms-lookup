@@ -41,6 +41,7 @@ Item {
     property var relatedByMode: ({})
     property var availableModes: []
     property var unavailableModes: []
+    property var incompleteModes: []
     property var candidateModes: []
     property string activeMode: ""
     property bool showRelated: false
@@ -100,6 +101,7 @@ Item {
         relatedByMode = ({})
         availableModes = []
         unavailableModes = []
+        incompleteModes = []
         candidateModes = []
         activeMode = ""
         showRelated = false
@@ -342,6 +344,7 @@ Item {
         relatedByMode = topRelatedByMode
         availableModes = data.available_modes || modeKeys(resultsByMode)
         unavailableModes = data.unavailable_modes || []
+        incompleteModes = data.incomplete_modes || []
         candidateModes = data.candidate_modes || []
         var preferredMode = requestedMode || data.default_mode
         var preferredTokenKey = requestedTokenKey
