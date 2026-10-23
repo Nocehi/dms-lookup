@@ -1574,6 +1574,7 @@ class SdcvGateEvidenceTests(unittest.TestCase):
             "query_in_cmdline",
             "main_prompt_count",
             "choice_prompt_count",
+            "choice_aborted",
             "process_group_reaped",
             "runner_decisions",
             "errors",

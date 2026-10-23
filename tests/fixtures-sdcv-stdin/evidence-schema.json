@@ -164,6 +164,7 @@
         "query_in_cmdline": {"type": "boolean"},
         "main_prompt_count": {"type": "integer", "minimum": 0},
         "choice_prompt_count": {"type": "integer", "minimum": 0},
+        "choice_aborted": {"type": "boolean"},
         "process_group_reaped": {"type": "boolean"},
         "runner_decisions": {
           "type": "array",
