@@ -10,6 +10,8 @@ Item {
     property string selectionCommand: Quickshell.env("DANK_LOOKUP_SELECTION_COMMAND")
                                       || "dank-lookup-selection"
     property string configPath: Quickshell.env("DANK_LOOKUP_CONFIG") || ""
+    // Optional headword font override; empty selects Jigmo, else Asebi Mincho.
+    property string headwordFontFamily: Quickshell.env("DANK_LOOKUP_HEADWORD_FONT") || ""
     property bool windowVisible: false
     property var testThemeSnapshot: ({})
 

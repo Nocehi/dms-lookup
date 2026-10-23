@@ -129,6 +129,10 @@ does not pretend to be complete Chinese or Japanese language identification.
 
 - fixed/min/max popup with scrollable plain-text definitions;
 - explicit source names and mode labels;
+- CJK headwords use the `Jigmo` Mincho font when installed (`ttf-jigmo`,
+  CC0), otherwise `Asebi Mincho`; set `DANK_LOOKUP_HEADWORD_FONT` to override.
+  Rare Ext B+ characters need fontconfig fallback to `Jigmo2`/`Jigmo3`;
+  `font.families` lists are not available in QML;
 - exact/related switch using the active displayed body;
 - token row consumes ordered `token_items` and supports duplicate token text;
 - query/mode/related/token changes reset scroll predictably;

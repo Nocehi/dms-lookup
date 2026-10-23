@@ -15,6 +15,15 @@ Item {
         return Qt.rgba(color.r, color.g, color.b, amount)
     }
 
+    // Jigmo (CC0, GlyphWiki Mincho) has real glyphs for the whole URO and
+    // Ext A; its siblings Jigmo2/Jigmo3 cover planes 2-3 through fontconfig.
+    // Asebi Mincho maps ~3,000 URO code points to empty glyphs, and Qt never
+    // falls back from a glyph the primary font claims, so it is only the
+    // fallback for systems without Jigmo.
+    readonly property string cjkHeadwordFamily: (controller.headwordFontFamily || "") !== ""
+        ? controller.headwordFontFamily
+        : (Qt.fontFamilies().indexOf("Jigmo") >= 0 ? "Jigmo" : "Asebi Mincho")
+
     function hasCjkOrKana(text) {
         for (var i = 0; i < text.length; ++i) {
             var code = text.charCodeAt(i)
@@ -52,7 +61,7 @@ Item {
                 // Qt's font.family performs platform fallback when the
                 // preferred family is absent; `font.families` is not available
                 // in the supported Quickshell Qt build.
-                font.family: root.hasCjkOrKana(text) ? "Asebi Mincho"
+                font.family: root.hasCjkOrKana(text) ? root.cjkHeadwordFamily
                                                      : "Noto Serif"
                 font.pixelSize: root.hasCjkOrKana(text) ? 25 : 23
                 maximumLineCount: 2
