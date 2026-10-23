@@ -631,6 +631,66 @@ class StdinAdapterTests(unittest.TestCase):
         self.assertEqual([entry["word"] for entry in entries], ["word"])
         self.assertEqual(choices, [None, 0, None])
 
+    def test_exact_homograph_prompt_is_aborted_and_every_entry_fetched(self):
+        # words.hk lists 為 (wai4, wai6) behind a choice prompt even for an
+        # exact search; an unanswered prompt used to block until timeout.
+        calls = []
+        options = b"[0)FixtureDict-->\xe7\x82\xba\n1)FixtureDict-->\xe7\x82\xba\n"
+        head = "Enter word or phrase: 為\n".encode("utf-8")
+
+        def protocol_runner(**kwargs):
+            query, choice = kwargs["query"], kwargs["choice"]
+            calls.append((query, choice))
+            if query.startswith("/"):
+                stdout = "Enter word or phrase: /為\n[]\nEnter word or phrase: \n".encode("utf-8")
+                return {"returncode": 0, "termination_reason": None, "stdout_bytes": len(stdout),
+                        "choice_prompt_count": 0, "process_group_reaped": True}, stdout
+            if choice is None:
+                stdout = head + options + b"Your choice[-1 to abort]: -1\n]\nEnter word or phrase: \n"
+                return {"returncode": 0, "termination_reason": None, "stdout_bytes": len(stdout),
+                        "choice_prompt_count": 1, "choice_aborted": True,
+                        "process_group_reaped": True}, stdout
+            entry = json.dumps({"dict": "FixtureDict", "word": "為", "definition": f"wai{choice}"},
+                               ensure_ascii=False).encode("utf-8")
+            stdout = (head + options + f"Your choice[-1 to abort]: {choice}\n".encode("ascii")
+                      + entry + b"]\nEnter word or phrase: \n")
+            return {"returncode": 0, "termination_reason": None, "stdout_bytes": len(stdout),
+                    "choice_prompt_count": 1, "process_group_reaped": True}, stdout
+
+        client = SdcvClient(executable="/bin/true", protocol_runner=protocol_runner)
+        entries, warning = client.query({"name": "FixtureDict", "allow_related": False}, "為")
+        self.assertIsNone(warning)
+        self.assertEqual([entry["definition"] for entry in entries], ["wai0", "wai1"])
+        self.assertEqual([choice for query, choice in calls if not query.startswith("/")], [None, 0, 1])
+
+    def test_unanswered_choice_prompt_is_aborted_by_protocol_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = write_shell(
+                pathlib.Path(directory) / "homograph-sdcv",
+                """
+                printf 'Enter word or phrase: '
+                read -r word
+                printf '%s\\n[0)FixtureDict-->%s\\n1)FixtureDict-->%s\\n' "$word" "$word" "$word"
+                printf 'Your choice[-1 to abort]: '
+                read -r choice
+                printf '%s\\n]\\n' "$choice"
+                printf 'Enter word or phrase: '
+                read -r rest || true
+                printf '\\n'
+                """,
+            )
+            started = time.monotonic()
+            run, stdout = run_bounded_protocol(
+                name="sdcv", argv=[str(fake)], environment=dict(os.environ),
+                query="為", choice=None, timeout_seconds=2.0,
+            )
+            self.assertLess(time.monotonic() - started, 1.0)
+            self.assertIsNone(run["termination_reason"])
+            self.assertTrue(run["choice_aborted"])
+            parsed = parse_protocol_stdout(stdout, query="為", choice=-1)
+            self.assertEqual(parsed["entries"], [])
+            self.assertEqual(len(parsed["options"]), 2)
+
     def test_external_tokenizer_receives_query_only_on_stdin(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

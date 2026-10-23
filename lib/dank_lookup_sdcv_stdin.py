@@ -179,6 +179,7 @@ def run_bounded_protocol(
     choice_search_from = 0
     query_sent = False
     choice_sent = False
+    choice_aborted = False
     stdin_closed = False
     killed = False
     termination_reason: str | None = None
@@ -287,6 +288,14 @@ def run_bounded_protocol(
             if choice is not None and choice_prompts >= 1 and not choice_sent:
                 send(f"{choice}\n".encode("ascii"), f"choice_sent:{choice}")
                 choice_sent = True
+            elif choice is None and choice_prompts >= 1 and not choice_sent:
+                # An exact search with several homograph entries makes sdcv
+                # prompt for a choice. Nobody would answer, so the source
+                # used to block until its timeout and exhaust the lookup
+                # budget. Abort the prompt; the caller re-queries each index.
+                send(b"-1\n", "choice_aborted")
+                choice_sent = True
+                choice_aborted = True
             if query_sent and main_prompts >= 2 and not stdin_closed:
                 close_stdin()
         try:
@@ -337,6 +346,7 @@ def run_bounded_protocol(
         ),
         "main_prompt_count": main_prompts,
         "choice_prompt_count": choice_prompts,
+        "choice_aborted": choice_aborted,
         "process_group_reaped": group_reaped,
         "runner_decisions": decisions,
     }

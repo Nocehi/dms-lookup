@@ -39,6 +39,7 @@ SCHEMA_VERSION = 2
 MAX_QUERY_CHARS = 4096
 TOKENIZER_STDOUT_CAP_BYTES = 1024 * 1024
 TOKENIZER_STDERR_CAP_BYTES = 1024 * 1024
+MAX_HOMOGRAPH_CHOICES = 8
 # Four UTF-8 bytes per Unicode scalar keeps every inline body within the CLI's
 # 8 MiB open-text stdin limit. Larger complete bodies must use open-ref.
 MAX_INLINE_FULL_CHARS = 2 * 1024 * 1024
@@ -543,6 +544,8 @@ class SdcvClient:
         if not run.get("process_group_reaped", False):
             return None, "sdcv_reap_failed", int(run.get("stdout_bytes", 0))
         parser_choice = choice if int(run.get("choice_prompt_count", 0)) else None
+        if parser_choice is None and run.get("choice_aborted"):
+            parser_choice = -1
         try:
             parsed = parse_protocol_stdout(stdout, query=query, choice=parser_choice)
         except SdcvProtocolError as exc:
@@ -550,16 +553,61 @@ class SdcvClient:
             return None, warning, int(run.get("stdout_bytes", 0))
         return parsed, None, int(run.get("stdout_bytes", 0))
 
-    def query(self, source: Mapping[str, Any], query: str) -> tuple[list[dict[str, Any]], str | None]:
-        data_dir = os.path.expanduser(str(source["data_dir"])) if source.get("data_dir") else None
-        dictionary = str(source.get("name", ""))
-        remaining_cap = self.stdout_cap_bytes
-        exact_result, warning, used = self._stdin_query(
+    def _exact_query(
+        self,
+        *,
+        query: str,
+        dictionary: str,
+        data_dir: str | None,
+        stdout_cap_bytes: int,
+    ) -> tuple[dict[str, Any] | None, str | None, int]:
+        """Exact lookup that also returns every homograph entry.
+
+        sdcv lists homographs (e.g. words.hk 為 wai4/wai6) behind a choice
+        prompt; the aborted first run yields the option list, and each index
+        is then fetched with its own exact run.
+        """
+        result, warning, used = self._stdin_query(
             query=query,
             dictionary=dictionary,
             data_dir=data_dir,
             exact=True,
             choice=None,
+            stdout_cap_bytes=stdout_cap_bytes,
+        )
+        if result is None or result["entries"] or not result["options"]:
+            return result, warning, used
+        entries: list[dict[str, Any]] = []
+        for option in result["options"][:MAX_HOMOGRAPH_CHOICES]:
+            remaining_cap = stdout_cap_bytes - used
+            if remaining_cap <= 0 or self.budget_exhausted:
+                warning = warning or "sdcv_stdout_cap"
+                break
+            selected, selected_warning, selected_used = self._stdin_query(
+                query=query,
+                dictionary=dictionary,
+                data_dir=data_dir,
+                exact=True,
+                choice=int(option["index"]),
+                stdout_cap_bytes=remaining_cap,
+            )
+            used += selected_used
+            if selected_warning:
+                warning = warning or selected_warning
+                if selected_warning in {"lookup_budget_exhausted", "lookup_cancelled"}:
+                    break
+            if selected is not None:
+                entries.extend(selected["entries"])
+        return {"entries": entries, "options": [], "decisions": result["decisions"]}, warning, used
+
+    def query(self, source: Mapping[str, Any], query: str) -> tuple[list[dict[str, Any]], str | None]:
+        data_dir = os.path.expanduser(str(source["data_dir"])) if source.get("data_dir") else None
+        dictionary = str(source.get("name", ""))
+        remaining_cap = self.stdout_cap_bytes
+        exact_result, warning, used = self._exact_query(
+            query=query,
+            dictionary=dictionary,
+            data_dir=data_dir,
             stdout_cap_bytes=remaining_cap,
         )
         remaining_cap = max(0, remaining_cap - used)
@@ -599,12 +647,10 @@ class SdcvClient:
                     option_word = str(option.get("word", ""))
                     if option_dictionary != dictionary or not option_word:
                         continue
-                    candidate, candidate_warning, used = self._stdin_query(
+                    candidate, candidate_warning, used = self._exact_query(
                         query=option_word,
                         dictionary=option_dictionary,
                         data_dir=data_dir,
-                        exact=True,
-                        choice=None,
                         stdout_cap_bytes=remaining_cap,
                     )
                     remaining_cap = max(0, remaining_cap - used)
