@@ -291,6 +291,27 @@ class DetectionRoutingTests(unittest.TestCase):
         item = next(item for item in result["token_items"] if item["token"] == "甚麼")
         self.assertIn(item["key"], result["results_by_token"])
 
+    def test_pre_stdin_tokenizer_is_reported_as_incompatible(self):
+        # The v0.7.1 tokenizer only took positional text; it answers the
+        # stdin CLI with a usage error and no tokens.
+        with tempfile.TemporaryDirectory() as directory:
+            tokenizer = write_shell(
+                pathlib.Path(directory) / "old-tokenize",
+                """
+                printf 'unknown option: --stdin\\n' >&2
+                exit 0
+                """,
+            )
+            client = FakeClient(
+                installed={"HanDict"},
+                responses={("HanDict", "甚麼"): [{"dict": "HanDict", "word": "甚麼", "definition": "what"}]},
+            )
+            with mock.patch.dict(os.environ, {"DANK_LOOKUP_TOKENIZER": str(tokenizer)}, clear=False):
+                result, _ = self._lookup_with(config_for_tests(), client, "為甚麼會這樣")
+        self.assertTrue(result["segmented"])
+        self.assertEqual(result["segmentation"]["engine"], "fallback-script-ngram")
+        self.assertEqual(result["segmentation"]["warning"], "tokenizer_incompatible")
+
     def test_fallback_segmentation_preserves_duplicate_tokens_with_indexed_keys_and_caps_count(self):
         query = "人" * 100
         client = FakeClient(

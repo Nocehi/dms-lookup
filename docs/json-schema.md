@@ -142,7 +142,9 @@ Segmentation runs only when the whole query has no top-level exact mode. An
 optional external tokenizer is bounded by the remaining global lookup budget
 and at most two seconds. Without it, fresh installs use an explicitly
 non-linguistic script-run/bigram fallback reported as
-`fallback-script-ngram` with `fallback_segmentation_nonlinguistic`. At most 24
+`fallback-script-ngram` with `fallback_segmentation_nonlinguistic`. If an
+installed tokenizer predates the stdin CLI (it rejects `--stdin`), the same
+fallback is reported with `tokenizer_incompatible` instead. At most 24
 tokens are queried. `segmented` becomes true only when at least one token has a
 usable exact mode; empty token records remain unselectable in the UI.
 

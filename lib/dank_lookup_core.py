@@ -1180,6 +1180,7 @@ def _segment(
     if cancel_event is not None and cancel_event.is_set():
         return [], None, "lookup_cancelled"
     process: subprocess.Popen[bytes] | None = None
+    stderr = b""
     try:
         process = subprocess.Popen(
             [str(path), "--lang", language, "--json", "--stdin"],
@@ -1193,7 +1194,7 @@ def _segment(
         process.stdin.close()
         process.stdin = None
         deadline = time.monotonic() + max(0.05, min(2.0, timeout_seconds))
-        stdout, _stderr, termination = _read_bounded_tokenizer_output(
+        stdout, stderr, termination = _read_bounded_tokenizer_output(
             process,
             deadline=deadline,
             cancel_event=cancel_event,
@@ -1222,6 +1223,11 @@ def _segment(
                     except OSError:
                         pass
     tokens = _fallback_segment(query)
+    if b"--stdin" in stderr:
+        # A pre-0.8 tokenizer (positional-text CLI) is installed. It cannot
+        # receive the query on stdin, so name the problem instead of hiding it
+        # behind the generic n-gram fallback warning.
+        return tokens, "fallback-script-ngram" if len(tokens) > 1 else None, "tokenizer_incompatible"
     return tokens, "fallback-script-ngram" if len(tokens) > 1 else None, (
         "fallback_segmentation_nonlinguistic" if len(tokens) > 1 else None
     )
