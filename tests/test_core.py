@@ -31,6 +31,7 @@ from dank_lookup_core import (  # noqa: E402
     lookup,
     render_entries,
     resolve_definition_format,
+    load_config,
     source_exact_only,
 )
 from dank_lookup_sdcv_stdin import (  # noqa: E402
@@ -631,6 +632,26 @@ class StdinAdapterTests(unittest.TestCase):
         self.assertIsNone(warning)
         self.assertEqual([entry["word"] for entry in entries], ["word"])
         self.assertEqual(choices, [None, 0, None])
+
+    def test_v1_config_allow_related_keeps_related_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "config.json"
+            sources = [
+                {"name": "Gcide", "when": "any", "exact_only": True, "allow_related": True},
+                {"name": "Wikt", "when": "any", "exact_only": True, "allow_related": False},
+                {"name": "Moe", "when": "cjk", "exact_only": False, "allow_related": False},
+            ]
+            for version in (1, 2):
+                path.write_text(json.dumps({"version": version, "modes": {"en-en": {"sources": sources}}}),
+                                encoding="utf-8")
+                config, metadata = load_config(path)
+                policy = [source_exact_only(source) for source in config["modes"]["en-en"]["sources"]]
+                if version == 1:
+                    self.assertEqual(policy, [False, True, True])
+                    self.assertEqual(metadata["legacy_related_policy"], "v1_allow_related")
+                else:
+                    self.assertEqual(policy, [True, True, False])
+                    self.assertNotIn("legacy_related_policy", metadata)
 
     def test_exact_homograph_prompt_is_aborted_and_every_entry_fetched(self):
         # words.hk lists 為 (wai4, wai6) behind a choice prompt even for an

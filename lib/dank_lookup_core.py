@@ -40,6 +40,8 @@ MAX_QUERY_CHARS = 4096
 TOKENIZER_STDOUT_CAP_BYTES = 1024 * 1024
 TOKENIZER_STDERR_CAP_BYTES = 1024 * 1024
 MAX_HOMOGRAPH_CHOICES = 8
+# Internal marker set by the v1 config mapping; never read from user config.
+V1_FUZZY_FALLBACK_KEY = "_v1_fuzzy_fallback_only"
 INCOMPLETE_SOURCE_WARNINGS = frozenset({"lookup_budget_exhausted", "sdcv_source_timeout"})
 # Four UTF-8 bytes per Unicode scalar keeps every inline body within the CLI's
 # 8 MiB open-text stdin limit. Larger complete bodies must use open-ref.
@@ -322,6 +324,32 @@ def detect_features(text: str) -> dict[str, Any]:
     }
 
 
+def _apply_v1_related_policy(config: dict[str, Any]) -> bool:
+    """Map version-1 related semantics onto the version-2 source policy.
+
+    Up to v0.7.1 the main body was always exact-only and `allow_related`
+    alone decided whether fuzzy entries formed a Related row; `exact_only`
+    was not read. Version 2 makes `exact_only: true` drop related entries,
+    so a v1 source with `exact_only: true, allow_related: true` (the
+    shipped GCIDE/WordNet sources) silently lost its Related row.
+    """
+    if config.get("version", 1) != 1:
+        return False
+    changed = False
+    for mode in config.get("modes", {}).values():
+        if not isinstance(mode, dict):
+            continue
+        for source in mode.get("sources", []):
+            if isinstance(source, dict) and "allow_related" in source:
+                wanted = not bool(source["allow_related"])
+                if source.get("exact_only") != wanted:
+                    source["exact_only"] = wanted
+                    changed = True
+                if source["allow_related"]:
+                    source[V1_FUZZY_FALLBACK_KEY] = True
+    return changed
+
+
 def load_config(path: str | os.PathLike[str] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     configured = path or os.environ.get("DANK_LOOKUP_CONFIG")
     if configured is None:
@@ -337,6 +365,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> tuple[dict[str, A
         if not isinstance(value, dict) or not isinstance(value.get("modes"), dict):
             raise ValueError("config must contain an object named modes")
         metadata["loaded"] = True
+        if _apply_v1_related_policy(value):
+            metadata["legacy_related_policy"] = "v1_allow_related"
         return value, metadata
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         metadata["warning"] = "config_invalid_using_builtin"
@@ -946,13 +976,18 @@ def _lookup_modes(
                 warnings.add(warning)
                 if warning in INCOMPLETE_SOURCE_WARNINGS:
                     mode_status[mode_key]["incomplete"] = True
+            # v1 sources only showed sdcv's fuzzy matches when the headword
+            # itself had no entry in that dictionary.
+            fuzzy_fallback_only = bool(source.get(V1_FUZZY_FALLBACK_KEY)) and any(
+                is_exact(entry, query) for entry in entries
+            )
             for entry in entries:
                 item = dict(entry)
                 item.setdefault("dict", name)
                 item["_definition_format"] = definition_format
                 if is_exact(item, query):
                     exact_entries.append(item)
-                elif not exact_only:
+                elif not exact_only and not fuzzy_fallback_only:
                     related_entries.append(item)
 
         exact_rendered, exact_vault = render_entries(
