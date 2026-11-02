@@ -140,7 +140,7 @@ Item {
                         }
 
                         background: Rectangle {
-                            radius: root.theme.cornerRadius
+                            radius: root.theme.radiusSmall
                             color: modeButton.selected
                                    ? root.theme.primary
                                    : (modeButton.hovered
@@ -503,7 +503,7 @@ Item {
                         }
 
                         background: Rectangle {
-                            radius: root.theme.cornerRadius
+                            radius: root.theme.radiusSmall
                             color: relationButton.selected
                                    ? root.theme.primary
                                    : (relationButton.hovered
@@ -546,7 +546,7 @@ Item {
                         }
 
                         background: Rectangle {
-                            radius: root.theme.cornerRadius
+                            radius: root.theme.radiusSmall
                             color: actionButton.hovered
                                    ? root.alpha(root.theme.primary, root.theme.stateHover)
                                    : "transparent"
