@@ -59,8 +59,11 @@ dictionaries change between lookup and the explicit Open action.
 
 Every source should declare a boolean `exact_only`. When `true`, only an NFKC
 casefold-equal headword is accepted. When `false`, bounded non-exact candidates
-from the adapter are retained under `related_by_mode`. The adapter always
-supplies exact and bounded candidate results and does not choose this policy.
+from the adapter are retained under `related_by_mode`. The policy decides how
+much the adapter fetches: an exact-only source fetches only fuzzy candidates
+whose headword is NFKC-casefold equal to the query (sdcv's exact search is
+case-sensitive), and skips the fuzzy search entirely for a query with no such
+variants, such as CJK text.
 For old configs that omit `exact_only`, `allow_related` is read only as a legacy
 fallback; fresh configs explicitly set `exact_only`.
 

@@ -42,6 +42,10 @@ TOKENIZER_STDERR_CAP_BYTES = 1024 * 1024
 MAX_HOMOGRAPH_CHOICES = 8
 # Internal marker set by the v1 config mapping; never read from user config.
 V1_FUZZY_FALLBACK_KEY = "_v1_fuzzy_fallback_only"
+# How many fuzzy candidates SdcvClient.query() fetches; see its docstring.
+CANDIDATES_ALL = "all"
+CANDIDATES_VARIANTS = "variants"
+CANDIDATES_FALLBACK = "fallback"
 INCOMPLETE_SOURCE_WARNINGS = frozenset({"lookup_budget_exhausted", "sdcv_source_timeout"})
 # Four UTF-8 bytes per Unicode scalar keeps every inline body within the CLI's
 # 8 MiB open-text stdin limit. Larger complete bodies must use open-ref.
@@ -631,7 +635,25 @@ class SdcvClient:
                 entries.extend(selected["entries"])
         return {"entries": entries, "options": [], "decisions": result["decisions"]}, warning, used
 
-    def query(self, source: Mapping[str, Any], query: str) -> tuple[list[dict[str, Any]], str | None]:
+    def query(
+        self,
+        source: Mapping[str, Any],
+        query: str,
+        *,
+        candidates: str = CANDIDATES_ALL,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Return exact entries plus bounded fuzzy candidates.
+
+        `candidates` limits how much of the fuzzy list is fetched:
+        CANDIDATES_ALL fetches every listed candidate; CANDIDATES_VARIANTS
+        fetches only candidates whose headword is NFKC-casefold equal to the
+        query (sdcv's exact search is case-sensitive) and skips the fuzzy
+        search when the query has no such variants; CANDIDATES_FALLBACK acts
+        like CANDIDATES_ALL when the exact search found nothing, else like
+        CANDIDATES_VARIANTS. A caller that would discard every non-exact
+        entry passes CANDIDATES_VARIANTS instead of paying one sdcv process
+        per discarded candidate.
+        """
         data_dir = os.path.expanduser(str(source["data_dir"])) if source.get("data_dir") else None
         dictionary = str(source.get("name", ""))
         remaining_cap = self.stdout_cap_bytes
@@ -652,12 +674,17 @@ class SdcvClient:
         entries = list(exact_result["entries"]) if exact_result is not None else []
         warnings = [warning] if warning else []
 
+        if candidates == CANDIDATES_FALLBACK:
+            candidates = CANDIDATES_VARIANTS if entries else CANDIDATES_ALL
+        variants_only = candidates == CANDIDATES_VARIANTS
+        have_identical = any(str(entry.get("word", "")) == query for entry in entries)
+
         # Exact search is case-sensitive in sdcv. The explicit fuzzy protocol
         # supplies a bounded candidate list; definitions are then fetched by
         # exact stdin lookups and policy remains in _lookup_modes().
-        # The adapter always supplies a bounded exact+candidate set. Whether a
-        # non-exact headword is accepted is exclusively a lookup policy choice.
-        if not self.budget_exhausted:
+        # Whether a non-exact headword is accepted is a lookup policy choice;
+        # `candidates` only avoids fetching entries that policy will discard.
+        if not self.budget_exhausted and not (variants_only and not _has_term_variants(query)):
             fuzzy_result, fuzzy_warning, used = self._stdin_query(
                 query="/" + query,
                 dictionary=dictionary,
@@ -677,6 +704,13 @@ class SdcvClient:
                     option_dictionary = str(option.get("dictionary", ""))
                     option_word = str(option.get("word", ""))
                     if option_dictionary != dictionary or not option_word:
+                        continue
+                    if variants_only and (
+                        (option_word == query and have_identical)
+                        or _normalised_term(option_word) != _normalised_term(query)
+                    ):
+                        # The exact search already returned the identical
+                        # headword; other non-variants would be discarded.
                         continue
                     candidate, candidate_warning, used = self._exact_query(
                         query=option_word,
@@ -711,6 +745,16 @@ class SdcvClient:
 
 def _normalised_term(value: str) -> str:
     return unicodedata.normalize("NFKC", str(value)).strip().casefold()
+
+
+def _has_term_variants(query: str) -> bool:
+    """Whether a headword other than `query` itself can be NFKC-casefold equal."""
+
+    value = str(query).strip()
+    return unicodedata.normalize("NFKC", value) != value or any(
+        character.casefold() != character or character.upper() != character
+        for character in value
+    )
 
 
 def is_exact(entry: Mapping[str, Any], query: str) -> bool:
@@ -971,7 +1015,13 @@ def _lookup_modes(
             name = str(source.get("name", ""))
             exact_only = source_exact_only(source)
             definition_format = resolve_definition_format(source, config)
-            entries, warning = client.query(source, query)
+            if source.get(V1_FUZZY_FALLBACK_KEY):
+                candidate_policy = CANDIDATES_FALLBACK
+            elif exact_only:
+                candidate_policy = CANDIDATES_VARIANTS
+            else:
+                candidate_policy = CANDIDATES_ALL
+            entries, warning = client.query(source, query, candidates=candidate_policy)
             if warning:
                 warnings.add(warning)
                 if warning in INCOMPLETE_SOURCE_WARNINGS:

@@ -58,12 +58,14 @@ class FakeClient:
         self.responses = responses or {}
         self.backend_ns = 1_000_000
         self.calls = []
+        self.candidate_policies = []
 
     def source_installed(self, source):
         return source["name"] in self.installed
 
-    def query(self, source, query):
+    def query(self, source, query, *, candidates="all"):
         self.calls.append((source["name"], query))
+        self.candidate_policies.append((source["name"], candidates))
         return list(self.responses.get((source["name"], query), [])), None
 
 
@@ -74,7 +76,7 @@ class MissingClient(FakeClient):
 class TokenBudgetClient(FakeClient):
     budget_exhausted = False
 
-    def query(self, source, query):
+    def query(self, source, query, *, candidates="all"):
         self.calls.append((source["name"], query))
         if len(query) < 3:
             self.budget_exhausted = True
@@ -653,6 +655,108 @@ class StdinAdapterTests(unittest.TestCase):
         self.assertIsNone(warning)
         self.assertEqual([entry["word"] for entry in entries], ["word"])
         self.assertEqual(choices, [None, 0, None])
+
+    @staticmethod
+    def _headword_protocol_runner(headwords, calls):
+        """Fake sdcv: exact search hits `headwords`; fuzzy lists all of them."""
+
+        def protocol_runner(**kwargs):
+            query = kwargs["query"]
+            calls.append((query, kwargs["choice"]))
+            head = f"Enter word or phrase: {query}\n".encode("utf-8")
+            tail = b"\nEnter word or phrase: \n"
+            if query.startswith("/"):
+                options = "".join(
+                    f"{index})FixtureDict-->{word}\n" for index, word in enumerate(headwords)
+                )
+                first = json.dumps(
+                    {"dict": "FixtureDict", "word": headwords[0], "definition": "first"},
+                    ensure_ascii=False,
+                )
+                stdout = head + f"[{options}Your choice[-1 to abort]: 0\n{first}]".encode("utf-8") + tail
+                prompt_count = 1
+            else:
+                found = [
+                    {"dict": "FixtureDict", "word": word, "definition": f"def {word}"}
+                    for word in headwords
+                    if word == query
+                ]
+                stdout = head + json.dumps(found, ensure_ascii=False).encode("utf-8") + tail
+                prompt_count = 0
+            return (
+                {
+                    "returncode": 0,
+                    "termination_reason": None,
+                    "stdout_bytes": len(stdout),
+                    "choice_prompt_count": prompt_count,
+                    "process_group_reaped": True,
+                },
+                stdout,
+            )
+
+        return protocol_runner
+
+    def test_exact_only_uncased_query_runs_one_sdcv_process(self):
+        # A CJK query has no case/NFKC variants, so an exact-only source needs
+        # only its exact search; fuzzy candidates would all be discarded.
+        calls = []
+        runner = self._headword_protocol_runner(["春", "春天", "春節", "青春"], calls)
+        client = SdcvClient(executable="/bin/true", protocol_runner=runner)
+        entries, warning = client.query({"name": "FixtureDict"}, "春", candidates="variants")
+        self.assertIsNone(warning)
+        self.assertEqual([entry["word"] for entry in entries], ["春"])
+        self.assertEqual(calls, [("春", None)])
+
+    def test_exact_only_cased_query_fetches_only_casefold_variants(self):
+        calls = []
+        runner = self._headword_protocol_runner(["Linux", "Linum", "lignum", "LINUX"], calls)
+        client = SdcvClient(executable="/bin/true", protocol_runner=runner)
+        entries, warning = client.query({"name": "FixtureDict"}, "linux", candidates="variants")
+        self.assertIsNone(warning)
+        self.assertEqual(sorted(entry["word"] for entry in entries), ["LINUX", "Linux"])
+        fetched = [query for query, choice in calls if not query.startswith("/")]
+        self.assertEqual(fetched, ["linux", "Linux", "LINUX"])
+
+    def test_fallback_candidates_fetch_everything_only_without_an_exact_entry(self):
+        calls = []
+        runner = self._headword_protocol_runner(["Linum", "Cinura", "jinx"], calls)
+        client = SdcvClient(executable="/bin/true", protocol_runner=runner)
+        entries, _warning = client.query({"name": "FixtureDict"}, "Linux", candidates="fallback")
+        self.assertEqual([entry["word"] for entry in entries], ["Linum", "Cinura", "jinx"])
+
+        calls.clear()
+        runner = self._headword_protocol_runner(["Linux", "Linum", "Cinura"], calls)
+        client = SdcvClient(executable="/bin/true", protocol_runner=runner)
+        entries, _warning = client.query({"name": "FixtureDict"}, "Linux", candidates="fallback")
+        self.assertEqual([entry["word"] for entry in entries], ["Linux"])
+        self.assertEqual([query for query, _choice in calls], ["Linux", "/Linux"])
+
+    def test_lookup_passes_candidate_policy_from_source_policy(self):
+        config = {
+            "version": 2,
+            "modes": {
+                "en": {
+                    "sources": [
+                        {"name": "Exact", "when": "any", "exact_only": True},
+                        {"name": "Fuzzy", "when": "any", "exact_only": False},
+                    ]
+                }
+            },
+        }
+        client = FakeClient(installed=["Exact", "Fuzzy"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            lookup("word", config_path=path, client=client)
+            v1 = {"version": 1, "modes": {"en": {"sources": [
+                {"name": "Exact", "when": "any", "exact_only": True, "allow_related": True},
+            ]}}}
+            path.write_text(json.dumps(v1), encoding="utf-8")
+            lookup("word", config_path=path, client=client)
+        self.assertEqual(
+            client.candidate_policies,
+            [("Exact", "variants"), ("Fuzzy", "all"), ("Exact", "fallback")],
+        )
 
     def test_v1_config_allow_related_keeps_related_row(self):
         with tempfile.TemporaryDirectory() as directory:
