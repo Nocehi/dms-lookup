@@ -48,7 +48,7 @@ completion is ignored.
 ## Install
 
 ```bash
-bash packaging/install-user.sh
+bash packaging/install-user.sh --with-tokenizer   # or --tokenizer-bin PATH / --without-tokenizer
 dank-lookup-language-packs status
 ```
 
@@ -116,12 +116,15 @@ or sharing any data. In particular, this project does not bundle words.hk,
 XDICT, reader.dict, or any dictionary whose exact artifact/license chain has
 not been admitted.
 
-The optional Rust tokenizer is built and installed as a managed file with
-`bash packaging/install-user.sh --with-tokenizer` (needs `cargo`), or from an
-existing build with `--tokenizer-bin PATH`. It reads the query on stdin; the
-v0.7.1 positional-text build is not compatible, and the installer warns
-loudly when it finds one (lookups then report `tokenizer_incompatible`). A
-fresh install also has a dependency-free, explicitly non-linguistic script/
+The Rust tokenizer is built and installed as a managed file with
+`bash packaging/install-user.sh --with-tokenizer` (needs `cargo`; the
+lindera-ipadic build script downloads IPADIC, so the build needs network
+access), or from an existing build with `--tokenizer-bin PATH`. It reads the
+query on stdin. When no tokenizer is installed, or the installed one is the
+v0.7.1 positional-text build, the installer stops before changing anything and
+names these options; it never overwrites an unmanaged tokenizer, so move an
+old one aside first. `--without-tokenizer` installs on purpose without one:
+segmentation then uses a dependency-free, explicitly non-linguistic script/
 bigram fallback, capped at 24 tokens and identified in the result metadata; it
 does not pretend to be complete Chinese or Japanese language identification.
 

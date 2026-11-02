@@ -279,7 +279,7 @@ class Frontend:
 
 def install_staged(home: pathlib.Path, env: dict[str, str]) -> None:
     completed = subprocess.run(
-        ["bash", str(INSTALLER)],
+        ["bash", str(INSTALLER), "--without-tokenizer"],
         capture_output=True,
         text=True,
         env=env,

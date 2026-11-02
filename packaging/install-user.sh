@@ -8,11 +8,13 @@ MANIFEST_TOOL="$SCRIPT_DIR/managed-files.py"
 LEGACY_MANIFEST="$SCRIPT_DIR/legacy-managed-files.json"
 WITH_DMS=false
 WITH_TOKENIZER=false
+WITHOUT_TOKENIZER=false
 TOKENIZER_SOURCE=""
 
 usage() {
     cat <<'EOF'
-Usage: packaging/install-user.sh [--with-dms] [--with-tokenizer | --tokenizer-bin PATH]
+Usage: packaging/install-user.sh [--with-dms]
+                                 [--with-tokenizer | --tokenizer-bin PATH | --without-tokenizer]
 
 Install standalone Dank Lookup and record every installed file in a managed
 manifest. Existing ~/.config/dank-lookup/config.json is never overwritten.
@@ -21,11 +23,15 @@ manifest. Existing ~/.config/dank-lookup/config.json is never overwritten.
   --with-tokenizer      build tokenizer/ with `cargo build --release --locked`
                         and install it as a managed file
   --tokenizer-bin PATH  install an already built tokenizer binary instead
+  --without-tokenizer   install without a tokenizer; segmentation then uses the
+                        non-linguistic bigram fallback
   -h, --help            show this help
 
 Omitting --with-dms preserves an already managed DMS scope; omitting the
-tokenizer options preserves an already managed tokenizer. An existing tokenizer
-that does not speak the stdin CLI is reported loudly. The installer does
+tokenizer options keeps an installed tokenizer that speaks the stdin CLI. If
+none is installed, or the installed one predates the stdin CLI (the v0.7.1
+build), the installer stops before changing anything; it never builds one
+unasked and never overwrites an unmanaged tokenizer. The installer does
 not download dictionaries, start/reload Quickshell, edit compositor keybinds,
 or reload DMS.
 EOF
@@ -35,6 +41,7 @@ while (($#)); do
     case "$1" in
         --with-dms) WITH_DMS=true ;;
         --with-tokenizer) WITH_TOKENIZER=true ;;
+        --without-tokenizer) WITHOUT_TOKENIZER=true ;;
         --tokenizer-bin)
             if (($# < 2)); then
                 printf 'install-user.sh: --tokenizer-bin needs a path\n' >&2
@@ -103,8 +110,12 @@ if [[ ! -d "$REPO_ROOT/qml" ]] ||
     exit 1
 fi
 
-if "$WITH_TOKENIZER" && [[ -n "$TOKENIZER_SOURCE" ]]; then
-    printf 'install-user.sh: use either --with-tokenizer or --tokenizer-bin\n' >&2
+tokenizer_options=0
+"$WITH_TOKENIZER" && tokenizer_options=$((tokenizer_options + 1))
+[[ -n "$TOKENIZER_SOURCE" ]] && tokenizer_options=$((tokenizer_options + 1))
+"$WITHOUT_TOKENIZER" && tokenizer_options=$((tokenizer_options + 1))
+if ((tokenizer_options > 1)); then
+    printf 'install-user.sh: use only one of --with-tokenizer, --tokenizer-bin, --without-tokenizer\n' >&2
     exit 2
 fi
 
@@ -117,16 +128,6 @@ tokenizer_speaks_stdin() {
     [[ "$output" == *'"tokens"'* ]]
 }
 
-if "$WITH_TOKENIZER"; then
-    if ! command -v cargo >/dev/null 2>&1; then
-        printf 'install-user.sh: --with-tokenizer needs cargo on PATH\n' >&2
-        exit 1
-    fi
-    cargo build --release --locked --quiet \
-        --manifest-path "$REPO_ROOT/tokenizer/Cargo.toml" \
-        --target-dir "$TEMP_ROOT/tokenizer-target"
-    TOKENIZER_SOURCE="$TEMP_ROOT/tokenizer-target/release/dank-lookup-tokenize"
-fi
 if [[ -n "$TOKENIZER_SOURCE" ]] && ! tokenizer_speaks_stdin "$TOKENIZER_SOURCE"; then
     printf 'install-user.sh: tokenizer does not answer the stdin CLI: %s\n' \
         "$TOKENIZER_SOURCE" >&2
@@ -236,6 +237,61 @@ if [[ -e "$DEST_SYSTEMD/dank-lookup.service" &&
     exit 1
 fi
 
+TOKENIZER_DEST="$DEST_LIB/dank-lookup-tokenize"
+tokenizer_was_managed() {
+    "$HAVE_OLD_MANIFEST" &&
+        python3 "$MANIFEST_TOOL" paths "$OLD_MANIFEST" |
+        grep -qxF "$(printf 'app_lib\tdank-lookup-tokenize')"
+}
+tokenizer_fail() {
+    {
+        echo
+        echo '!!! install-user.sh: tokenizer problem, nothing was installed !!!'
+        printf '%s\n' "$@"
+        echo 'Rerun with one of:'
+        echo '  --with-tokenizer       build tokenizer/ with cargo (stdin CLI)'
+        echo '  --tokenizer-bin PATH   install an already built stdin-CLI tokenizer'
+        echo '  --without-tokenizer    use the non-linguistic bigram fallback'
+    } >&2
+    exit 1
+}
+# Decide the tokenizer before the first file is installed, so a missing or
+# pre-stdin tokenizer stops the install instead of degrading segmentation.
+if [[ -e "$TOKENIZER_DEST" || -L "$TOKENIZER_DEST" ]]; then
+    if { "$WITH_TOKENIZER" || [[ -n "$TOKENIZER_SOURCE" ]]; } && ! tokenizer_was_managed; then
+        tokenizer_fail \
+            "refusing to overwrite unmanaged tokenizer: $TOKENIZER_DEST" \
+            'Move it aside first (a v0.7.1 install still needs it), then rerun.'
+    fi
+    if ! "$WITH_TOKENIZER" && [[ -z "$TOKENIZER_SOURCE" ]] &&
+       ! tokenizer_speaks_stdin "$TOKENIZER_DEST"; then
+        tokenizer_fail \
+            "incompatible tokenizer: $TOKENIZER_DEST does not answer the stdin CLI" \
+            '(probably the v0.7.1 positional-text build). Lookups would report' \
+            'tokenizer_incompatible and segment with the bigram fallback.' \
+            'Move it aside (a v0.7.1 install still needs it), then rerun.'
+    fi
+elif ! "$WITH_TOKENIZER" && [[ -z "$TOKENIZER_SOURCE" ]] && ! "$WITHOUT_TOKENIZER"; then
+    tokenizer_fail "no tokenizer installed at $TOKENIZER_DEST"
+fi
+if "$WITH_TOKENIZER"; then
+    if ! command -v cargo >/dev/null 2>&1; then
+        printf 'install-user.sh: --with-tokenizer needs cargo on PATH\n' >&2
+        exit 1
+    fi
+    # Note: lindera-ipadic's build script downloads IPADIC even when cargo
+    # itself has every crate cached.
+    cargo build --release --locked --quiet \
+        --manifest-path "$REPO_ROOT/tokenizer/Cargo.toml" \
+        --target-dir "$TEMP_ROOT/tokenizer-target"
+    TOKENIZER_SOURCE="$TEMP_ROOT/tokenizer-target/release/dank-lookup-tokenize"
+    if ! tokenizer_speaks_stdin "$TOKENIZER_SOURCE"; then
+        printf 'install-user.sh: built tokenizer does not answer the stdin CLI: %s\n' \
+            "$TOKENIZER_SOURCE" >&2
+        exit 1
+    fi
+fi
+
 echo 'Installing standalone Dank Lookup to user-scope paths...'
 
 install_managed 755 "$REPO_ROOT/bin/dank-lookup" home_bin dank-lookup
@@ -272,19 +328,7 @@ install_managed 644 "$REPO_ROOT/qml/matugen-light-template.json" \
 install_managed 600 /dev/null matugen .installed-by-dank-lookup
 install_managed 644 "$REPO_ROOT/systemd/dank-lookup.service" \
     systemd_user dank-lookup.service
-TOKENIZER_DEST="$DEST_LIB/dank-lookup-tokenize"
-tokenizer_was_managed() {
-    "$HAVE_OLD_MANIFEST" &&
-        python3 "$MANIFEST_TOOL" paths "$OLD_MANIFEST" |
-        grep -qxF "$(printf 'app_lib\tdank-lookup-tokenize')"
-}
 if [[ -n "$TOKENIZER_SOURCE" ]]; then
-    if [[ -e "$TOKENIZER_DEST" || -L "$TOKENIZER_DEST" ]] && ! tokenizer_was_managed; then
-        printf 'install-user.sh: refusing to overwrite unmanaged tokenizer: %s\n' \
-            "$TOKENIZER_DEST" >&2
-        printf 'install-user.sh: move it aside first (a v0.7.1 install still needs it)\n' >&2
-        exit 1
-    fi
     install_managed 755 "$TOKENIZER_SOURCE" app_lib dank-lookup-tokenize
 elif tokenizer_was_managed && [[ -f "$TOKENIZER_DEST" ]]; then
     record_managed app_lib dank-lookup-tokenize "$TOKENIZER_DEST"
@@ -361,15 +405,6 @@ else
     echo 'No DMS wrapper scope was installed.'
 fi
 if [[ ! -e "$TOKENIZER_DEST" ]]; then
-    echo 'No tokenizer installed; segmentation uses the non-linguistic bigram'
-    echo 'fallback. Install one with --with-tokenizer.'
-elif ! tokenizer_speaks_stdin "$TOKENIZER_DEST"; then
-    {
-        echo
-        echo '!!! WARNING: incompatible tokenizer !!!'
-        printf '%s does not answer the stdin CLI\n' "$TOKENIZER_DEST"
-        echo '(probably the v0.7.1 positional-text build). Lookups report'
-        echo 'tokenizer_incompatible and segment with the bigram fallback.'
-        echo 'Move it aside and rerun with --with-tokenizer.'
-    } >&2
+    echo 'No tokenizer installed (--without-tokenizer); segmentation uses the'
+    echo 'non-linguistic bigram fallback. Install one with --with-tokenizer.'
 fi

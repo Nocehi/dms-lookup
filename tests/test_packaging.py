@@ -1881,7 +1881,7 @@ class PackagingMatrixTests(unittest.TestCase):
 
     def install(self, with_dms: bool = False) -> dict:
         arguments = ("--with-dms",) if with_dms else ()
-        self.run_script("install-user.sh", *arguments)
+        self.run_script("install-user.sh", *arguments, "--without-tokenizer")
         return managed_files.load_manifest(self.manifest_path)
 
     def assert_manifest_matches_regular_files(self, manifest: dict) -> None:
@@ -1937,20 +1937,61 @@ class PackagingMatrixTests(unittest.TestCase):
         self.run_script("uninstall-user.sh")
         self.assertFalse(installed.exists())
 
-    def test_unmanaged_old_tokenizer_is_kept_and_reported_loudly(self):
+    def assert_nothing_installed(self) -> None:
+        self.assertFalse(self.manifest_path.exists())
+        self.assertFalse((self.roots["home_bin"] / "dank-lookup").exists())
+        self.assertFalse(self.roots["quickshell"].exists())
+
+    def test_unmanaged_old_tokenizer_fails_install_loudly_and_is_kept(self):
         old = self._fake_tokenizer("old-tokenize", speaks_stdin=False)
         installed = self.roots["app_lib"] / "dank-lookup-tokenize"
         installed.parent.mkdir(parents=True)
         installed.write_bytes(old.read_bytes())
         installed.chmod(0o755)
-        run = self.run_script("install-user.sh")
-        self.assertIn("incompatible tokenizer", run.stderr)
-        self.assertEqual(installed.read_bytes(), old.read_bytes())
-        self.assertNotIn("dank-lookup-tokenize", managed_files.load_manifest(self.manifest_path)["roots"]["app_lib"])
+        for arguments in ((), ("--without-tokenizer",)):
+            with self.subTest(arguments=arguments):
+                run = self.run_script("install-user.sh", *arguments, expected=1)
+                self.assertIn("incompatible tokenizer", run.stderr)
+                self.assertIn("nothing was installed", run.stderr)
+                for option in ("--with-tokenizer", "--tokenizer-bin PATH", "Move it aside"):
+                    self.assertIn(option, run.stderr)
+                self.assertEqual(installed.read_bytes(), old.read_bytes())
+                self.assert_nothing_installed()
         new = self._fake_tokenizer("new-tokenize", speaks_stdin=True)
-        refused = self.run_script("install-user.sh", "--tokenizer-bin", str(new), expected=1)
-        self.assertIn("refusing to overwrite unmanaged tokenizer", refused.stderr)
-        self.assertEqual(installed.read_bytes(), old.read_bytes())
+        for arguments in (("--tokenizer-bin", str(new)), ("--with-tokenizer",)):
+            with self.subTest(arguments=arguments):
+                refused = self.run_script("install-user.sh", *arguments, expected=1)
+                self.assertIn("refusing to overwrite unmanaged tokenizer", refused.stderr)
+                self.assertEqual(installed.read_bytes(), old.read_bytes())
+                self.assert_nothing_installed()
+
+    def test_missing_tokenizer_fails_install_unless_explicitly_omitted(self):
+        run = self.run_script("install-user.sh", expected=1)
+        self.assertIn("no tokenizer installed", run.stderr)
+        for option in ("--with-tokenizer", "--tokenizer-bin PATH", "--without-tokenizer"):
+            self.assertIn(option, run.stderr)
+        self.assert_nothing_installed()
+        run = self.run_script("install-user.sh", "--without-tokenizer")
+        self.assertIn("bigram", run.stdout)
+        self.assertFalse((self.roots["app_lib"] / "dank-lookup-tokenize").exists())
+        # Reinstalling with a compatible unmanaged tokenizer in place keeps it.
+        compatible = self._fake_tokenizer("compatible-tokenize", speaks_stdin=True)
+        installed = self.roots["app_lib"] / "dank-lookup-tokenize"
+        installed.write_bytes(compatible.read_bytes())
+        installed.chmod(0o755)
+        self.run_script("install-user.sh")
+        self.assertEqual(installed.read_bytes(), compatible.read_bytes())
+
+    def test_tokenizer_options_are_mutually_exclusive(self):
+        tokenizer = self._fake_tokenizer("new-tokenize", speaks_stdin=True)
+        for arguments in (
+            ("--with-tokenizer", "--without-tokenizer"),
+            ("--tokenizer-bin", str(tokenizer), "--without-tokenizer"),
+            ("--with-tokenizer", "--tokenizer-bin", str(tokenizer)),
+        ):
+            with self.subTest(arguments=arguments):
+                self.run_script("install-user.sh", *arguments, expected=2)
+                self.assert_nothing_installed()
 
     def test_tokenizer_bin_without_stdin_cli_is_rejected_before_install(self):
         old = self._fake_tokenizer("old-tokenize", speaks_stdin=False)
@@ -2017,7 +2058,7 @@ class PackagingMatrixTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self.run_script("install-user.sh", expected=1)
+        self.run_script("install-user.sh", "--without-tokenizer", expected=1)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
         self.run_script("uninstall-user.sh", expected=1)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")

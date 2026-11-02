@@ -208,7 +208,7 @@ check_install_parity() {
     chmod 700 "$fake_runtime" || return 1
 
     HOME="$fake_home" XDG_CONFIG_HOME="$fake_config" XDG_DATA_HOME="$fake_data" \
-        packaging/install-user.sh >"$TEMP_ROOT/install-fresh.log" || return 1
+        packaging/install-user.sh --without-tokenizer >"$TEMP_ROOT/install-fresh.log" || return 1
     python3 - "$fake_config/dank-lookup/config.json" <<'PY' || return 1
 import json
 import pathlib
@@ -226,7 +226,7 @@ PY
         || return 1
 
     HOME="$fake_home" XDG_CONFIG_HOME="$fake_config" XDG_DATA_HOME="$fake_data" \
-        packaging/install-user.sh >"$TEMP_ROOT/install-repeat.log" || return 1
+        packaging/install-user.sh --without-tokenizer >"$TEMP_ROOT/install-repeat.log" || return 1
 
     local after
     after="$(sha256sum "$fake_config/dank-lookup/config.json" | cut -d' ' -f1)" \
@@ -293,7 +293,8 @@ assert result["runtime"]["retained"] is False
 PY
 
     HOME="$fake_home" XDG_CONFIG_HOME="$fake_config" XDG_DATA_HOME="$fake_data" \
-        packaging/install-user.sh --with-dms >"$TEMP_ROOT/install-dms.log" || return 1
+        packaging/install-user.sh --with-dms --without-tokenizer \
+        >"$TEMP_ROOT/install-dms.log" || return 1
     [[ -f "$fake_config/DankMaterialShell/plugins/dankLookup/plugin.json" ]] \
         || return 1
     [[ -f "$fake_config/DankMaterialShell/plugins/dankLookup/shared/LookupApplication.qml" ]] \
