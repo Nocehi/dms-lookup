@@ -186,6 +186,7 @@ python3 -m unittest -v \
   tests.test_cli \
   tests.test_core \
   tests.test_dependency_preflight \
+  tests.test_fixture_runner \
   tests.test_packaging \
   tests.test_runtime \
   tests.test_selection_latency \

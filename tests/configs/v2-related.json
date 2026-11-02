@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "modes": {
+    "en-en": {
+      "label": "英英",
+      "enabled": true,
+      "default_for": ["latin"],
+      "show_related": false,
+      "sources": [
+        {"name": "dictd_www.dict.org_gcide", "data_dir": "/usr/share/stardict/dic", "when": "any", "exact_only": false, "allow_related": true},
+        {"name": "WordNet", "data_dir": "/usr/share/stardict/dic", "when": "any", "exact_only": false, "allow_related": true}
+      ]
+    }
+  },
+  "fallback": {"mock": false, "unfiltered": false}
+}

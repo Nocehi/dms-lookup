@@ -1,0 +1,29 @@
+{
+  "query": "Linux",
+  "expect": {
+    "backend": "sdcv",
+    "available_modes_contains": ["en-en"],
+    "results_by_mode.en-en": {
+      "subtitle_contains": ["WordNet"],
+      "body_contains": ["Linux"],
+      "body_not_contains": ["Linum", "Cinura"]
+    },
+    "related_by_mode.en-en": {
+      "subtitle_contains": ["dictd_www.dict.org_gcide", "WordNet"],
+      "body_contains": ["Linum", "Cinura", "[WordNet]", "likuta"]
+    }
+  },
+  "expect_by_config": [
+    {
+      "when": {"version": 1},
+      "reason": "v1 allow_related shows fuzzy entries only from a dictionary without an exact headword (v0.7.1 semantics): GCIDE has no Linux, WordNet does",
+      "expect": {
+        "related_by_mode.en-en": {
+          "subtitle_contains": ["dictd_www.dict.org_gcide"],
+          "body_contains": ["Linum", "Cinura"],
+          "body_not_contains": ["[WordNet]", "likuta"]
+        }
+      }
+    }
+  ]
+}

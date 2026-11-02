@@ -22,6 +22,7 @@ CONFIG_BY_SET = {
     "fixtures-ja-yue": ROOT / "tests/configs/reading-routing.json",
     "fixtures-risk-hardening": ROOT / "tests/configs/reading-routing.json",
     "fixtures-segmentation": ROOT / "tests/configs/reading-routing.json",
+    "fixtures-v2-related": ROOT / "tests/configs/v2-related.json",
 }
 
 
@@ -129,9 +130,54 @@ def backend_argv(backend: pathlib.Path) -> list[str]:
     return [sys.executable, str(backend), "--stdin"]
 
 
+def config_matches(config_data, when):
+    """Whether a fixture's `expect_by_config[].when` holds for a config.
+
+    `version` compares the config schema version (absent means 1);
+    `mode_sources_include` maps a mode id to dictionary names that mode must
+    list. Conditions describe the config, never the lookup result.
+    """
+    unknown = set(when) - {"version", "mode_sources_include"}
+    if unknown:
+        raise ValueError(f"unknown expect_by_config condition {sorted(unknown)}")
+    if "version" in when and config_data.get("version", 1) != when["version"]:
+        return False
+    modes = config_data.get("modes", {})
+    for mode, names in when.get("mode_sources_include", {}).items():
+        mode_config = modes.get(mode)
+        listed = {
+            str(source.get("name", ""))
+            for source in (mode_config or {}).get("sources", [])
+            if isinstance(source, dict)
+        }
+        if not isinstance(mode_config, dict) or not set(names) <= listed:
+            return False
+    return True
+
+
+def fixture_expectations(fixture, config_data):
+    """Return the fixture's base expectations with matching config variants applied."""
+    expect = dict(fixture["expect"])
+    applied = []
+    for variant in fixture.get("expect_by_config", []):
+        if not config_matches(config_data, variant["when"]):
+            continue
+        if not variant.get("reason"):
+            raise ValueError("expect_by_config entries must state a reason")
+        for key, value in variant["expect"].items():
+            if isinstance(value, dict) and isinstance(expect.get(key), dict):
+                expect[key] = {**expect[key], **value}
+            else:
+                expect[key] = value
+        applied.append(variant["reason"])
+    return expect, applied
+
+
 def run_fixture(path, backend, config, output_dir, timeout):
     fixture = json.loads(path.read_text(encoding="utf-8"))
     query = fixture["query"]
+    config_data = json.loads(pathlib.Path(config).read_text(encoding="utf-8"))
+    expect, applied = fixture_expectations(fixture, config_data)
     output = output_dir / f"fixture-{path.stem}.json"
     env = os.environ.copy()
     env["DANK_LOOKUP_OUTPUT"] = str(output)
@@ -146,12 +192,12 @@ def run_fixture(path, backend, config, output_dir, timeout):
         env=env,
     )
     if result.returncode != 0:
-        return [f"backend exit {result.returncode}: {result.stderr.strip()}"]
+        return [f"backend exit {result.returncode}: {result.stderr.strip()}"], applied
     try:
         data = json.loads(output.read_text(encoding="utf-8"))
     except Exception as exc:
-        return [f"JSON parse error: {exc}"]
-    return check_expect(data, fixture["expect"], prefix=query)
+        return [f"JSON parse error: {exc}"], applied
+    return check_expect(data, expect, prefix=query), applied
 
 
 def main(argv=None):
@@ -190,7 +236,7 @@ def main(argv=None):
     with tempfile.TemporaryDirectory(prefix="dank-lookup-fixtures-") as temporary:
         output_dir = pathlib.Path(temporary)
         for fixture in fixture_files:
-            errors = run_fixture(fixture, backend, config, output_dir, args.timeout)
+            errors, applied = run_fixture(fixture, backend, config, output_dir, args.timeout)
             if errors:
                 print(f"  FAIL  {fixture.name}")
                 for error in errors:
@@ -199,6 +245,8 @@ def main(argv=None):
             else:
                 print(f"  PASS  {fixture.name}")
                 passed += 1
+            for reason in applied:
+                print(f"         config variant: {reason}")
     print(f"result: {passed}/{passed + failed} passed for {fixture_dir.name}")
     return 1 if failed else 0
 
