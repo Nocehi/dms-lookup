@@ -9,5 +9,12 @@
       "subtitle_contains": ["reader.dict JA"],
       "body_contains": ["短詩形", "はいく"]
     }
-  }
+  },
+  "expect_by_config": [
+    {
+      "when": {"mode_sources_include": {"han": ["CC-CEDICT 漢英辭典"]}},
+      "reason": "CC-CEDICT gives han an exact 俳句 entry and han precedes ja, so han ranks first as in v0.7.1; 萌典 has no 俳句",
+      "expect": {"default_mode": "han"}
+    }
+  ]
 }
