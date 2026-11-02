@@ -1,6 +1,9 @@
 import QtQuick
+import QtQuick.Effects
 import QtQuick.Templates as T
 
+// Every colour, radius, spacing step, type size and font family comes from the
+// LookupTheme token file (`theme`); tests/test_design_tokens.py enforces it.
 Item {
     id: root
 
@@ -12,59 +15,52 @@ Item {
     signal openFullRequested
 
     function alpha(color, amount) {
-        return Qt.rgba(color.r, color.g, color.b, amount)
+        return root.theme.withAlpha(color, amount)
     }
 
-    // Jigmo (CC0, GlyphWiki Mincho) has real glyphs for the whole URO and
-    // Ext A; its siblings Jigmo2/Jigmo3 cover planes 2-3 through fontconfig.
-    // Asebi Mincho maps ~3,000 URO code points to empty glyphs, and Qt never
-    // falls back from a glyph the primary font claims, so it is only the
-    // fallback for systems without Jigmo.
-    readonly property string cjkHeadwordFamily: (controller.headwordFontFamily || "") !== ""
-        ? controller.headwordFontFamily
-        : (Qt.fontFamilies().indexOf("Jigmo") >= 0 ? "Jigmo" : "Asebi Mincho")
-
-    function hasCjkOrKana(text) {
-        for (var i = 0; i < text.length; ++i) {
-            var code = text.charCodeAt(i)
-            if ((code >= 0x3400 && code <= 0x9fff)
-                    || (code >= 0x3040 && code <= 0x30ff))
-                return true
-        }
-        return false
+    // Elevation level 2 (DMS popout baseline). RectangularShadow needs Qt 6.9+.
+    RectangularShadow {
+        anchors.fill: card
+        visible: root.theme.shadowEnabled
+        radius: card.radius
+        offset: Qt.vector2d(0, root.theme.shadowOffsetY)
+        blur: root.theme.shadowBlur
+        color: root.theme.shadowColor
     }
 
     Rectangle {
+        id: card
         anchors.fill: parent
-        color: root.theme.surface_container_high
-        radius: 18
-        border.color: root.theme.outline
-        border.width: 1
+        anchors.margins: root.theme.shadowPadding
+        color: root.theme.cardColor
+        radius: root.theme.windowRadius
+        border.color: root.theme.borderColor
+        border.width: root.theme.borderWidth
 
         Item {
             id: header
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.margins: 16
-            height: 58
+            anchors.margins: root.theme.popoutPadding
+            height: Math.max(root.theme.iconButtonSize, queryLabel.implicitHeight)
 
             Text {
                 id: queryLabel
                 anchors.left: parent.left
                 anchors.right: closeButton.left
-                anchors.rightMargin: 12
+                anchors.rightMargin: root.theme.gap
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.controller.queryText !== ""
                       ? root.controller.queryText : "Reading selection…"
                 color: root.theme.on_surface
-                // Qt's font.family performs platform fallback when the
-                // preferred family is absent; `font.families` is not available
-                // in the supported Quickshell Qt build.
-                font.family: root.hasCjkOrKana(text) ? root.cjkHeadwordFamily
-                                                     : "Noto Serif"
-                font.pixelSize: root.hasCjkOrKana(text) ? 25 : 23
-                maximumLineCount: 2
+                // Jigmo for CJK headwords (DANK_LOOKUP_HEADWORD_FONT overrides),
+                // Asebi Mincho for other headings. `font.families` is not
+                // available in the supported Quickshell Qt build.
+                font.family: root.theme.headingFamily(text, root.controller.headwordFontFamily)
+                font.pixelSize: root.theme.hasCjkOrKana(text)
+                                ? root.theme.fontSizeXXLarge : root.theme.fontSizeXLarge
+                maximumLineCount: root.theme.headingMaxLines
                 elide: Text.ElideRight
                 wrapMode: Text.Wrap
             }
@@ -73,22 +69,23 @@ Item {
                 id: closeButton
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                implicitWidth: 34
-                implicitHeight: 34
+                implicitWidth: root.theme.iconButtonSize
+                implicitHeight: root.theme.iconButtonSize
                 hoverEnabled: true
 
                 contentItem: Text {
                     text: "×"
                     color: root.theme.on_surface
-                    font.pixelSize: 20
+                    font.family: root.theme.fontUi
+                    font.pixelSize: root.theme.fontSizeXLarge
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }
 
                 background: Rectangle {
-                    radius: 17
+                    radius: root.theme.radiusFull
                     color: closeButton.hovered
-                           ? root.alpha(root.theme.primary, 0.20)
+                           ? root.alpha(root.theme.primary, root.theme.stateHover)
                            : "transparent"
                 }
 
@@ -99,11 +96,12 @@ Item {
         Flickable {
             id: modeStrip
             anchors.top: header.bottom
+            anchors.topMargin: visible ? root.theme.gap : 0
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.leftMargin: 16
-            anchors.rightMargin: 16
-            height: root.controller.availableModes.length > 0 ? 38 : 0
+            anchors.leftMargin: root.theme.popoutPadding
+            anchors.rightMargin: root.theme.popoutPadding
+            height: root.controller.availableModes.length > 0 ? root.theme.controlHeight : 0
             visible: height > 0
             clip: true
             contentWidth: modeRow.width
@@ -113,7 +111,7 @@ Item {
             Row {
                 id: modeRow
                 height: parent.height
-                spacing: 6
+                spacing: root.theme.spacingS
 
                 Repeater {
                     model: root.controller.availableModes
@@ -123,32 +121,34 @@ Item {
                         required property string modelData
                         property var modeResult: root.controller.resultsByMode[modelData]
                                                    || ({})
-                        implicitWidth: Math.max(70, modeText.implicitWidth + 24)
-                        implicitHeight: 32
+                        property bool selected: root.controller.activeMode === modelData
+                        implicitWidth: Math.max(root.theme.minControlWidth,
+                                                modeText.implicitWidth + 2 * root.theme.spacingL)
+                        implicitHeight: root.theme.controlHeight
                         hoverEnabled: true
 
                         contentItem: Text {
                             id: modeText
                             text: modeButton.modeResult.label || modeButton.modelData
-                            color: root.controller.activeMode === modeButton.modelData
-                                   ? root.theme.on_primary : root.theme.on_surface
-                            font.pixelSize: 12
+                            color: modeButton.selected ? root.theme.on_primary
+                                                       : root.theme.on_surface
+                            font.family: root.theme.fontUi
+                            font.pixelSize: root.theme.fontSizeSmall
                             font.weight: Font.Medium
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
                         }
 
                         background: Rectangle {
-                            radius: 10
-                            color: root.controller.activeMode === modeButton.modelData
+                            radius: root.theme.cornerRadius
+                            color: modeButton.selected
                                    ? root.theme.primary
                                    : (modeButton.hovered
-                                      ? root.alpha(root.theme.primary, 0.16)
+                                      ? root.alpha(root.theme.primary, root.theme.stateHover)
                                       : "transparent")
-                            border.color: root.controller.activeMode === modeButton.modelData
-                                          ? "transparent" : root.theme.outline
-                            border.width: root.controller.activeMode === modeButton.modelData
-                                          ? 0 : 1
+                            border.color: modeButton.selected ? "transparent"
+                                                              : root.theme.borderColor
+                            border.width: modeButton.selected ? 0 : root.theme.borderWidth
                         }
 
                         onClicked: root.controller.applyMode(modelData)
@@ -160,12 +160,13 @@ Item {
         Flickable {
             id: tokenStrip
             anchors.top: modeStrip.bottom
+            anchors.topMargin: visible ? root.theme.spacingS : 0
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.leftMargin: 16
-            anchors.rightMargin: 16
+            anchors.leftMargin: root.theme.popoutPadding
+            anchors.rightMargin: root.theme.popoutPadding
             height: root.controller.segmented && root.controller.tokenItems.length > 0
-                    ? 36 : 0
+                    ? root.theme.chipHeight : 0
             visible: height > 0
             clip: true
             contentWidth: tokenRow.width
@@ -175,30 +176,32 @@ Item {
             Row {
                 id: tokenRow
                 height: parent.height
-                spacing: 6
+                spacing: root.theme.spacingXS
 
                 T.Button {
                     id: wholeButton
-                    implicitWidth: wholeText.implicitWidth + 20
-                    implicitHeight: 28
+                    implicitWidth: wholeText.implicitWidth + 2 * root.theme.spacingM
+                    implicitHeight: root.theme.chipHeight
                     hoverEnabled: true
 
                     contentItem: Text {
                         id: wholeText
                         text: "Whole"
                         color: root.theme.on_surface
-                        opacity: root.controller.activeToken === "" ? 1.0 : 0.70
-                        font.pixelSize: 11
+                        opacity: root.controller.activeToken === "" ? 1.0
+                                                                    : root.theme.textSecondary
+                        font.family: root.theme.fontUi
+                        font.pixelSize: root.theme.fontSizeSmall
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                     }
 
                     background: Rectangle {
-                        radius: 9
+                        radius: root.theme.radiusSmall
                         color: root.controller.activeToken === ""
-                               ? root.alpha(root.theme.primary, 0.22)
+                               ? root.alpha(root.theme.primary, root.theme.stateSelected)
                                : (wholeButton.hovered
-                                  ? root.alpha(root.theme.primary, 0.12)
+                                  ? root.alpha(root.theme.primary, root.theme.stateHover)
                                   : "transparent")
                     }
 
@@ -219,30 +222,42 @@ Item {
                                                        tokenTextValue,
                                                        tokenIndex)
                         property bool hasResult: resultKey !== ""
-                        implicitWidth: Math.max(42, tokenText.implicitWidth + 20)
-                        implicitHeight: 28
+                        // A token cut short by the lookup budget is marked, not
+                        // presented as a plain miss.
+                        property bool timedOut: root.controller.incompleteTokens.indexOf(
+                                                    declaredKey) >= 0
+                        implicitWidth: Math.max(root.theme.minChipWidth,
+                                                tokenText.implicitWidth + 2 * root.theme.spacingM)
+                        implicitHeight: root.theme.chipHeight
                         hoverEnabled: hasResult
                         enabled: hasResult
 
                         contentItem: Text {
                             id: tokenText
                             text: tokenButton.tokenTextValue
-                            color: root.theme.on_surface
-                            opacity: !tokenButton.hasResult ? 0.38
+                            color: tokenButton.timedOut ? root.theme.error : root.theme.on_surface
+                            opacity: !tokenButton.hasResult
+                                     ? (tokenButton.timedOut ? root.theme.textSecondary
+                                                             : root.theme.textDisabled)
                                      : (root.controller.activeTokenKey
-                                        === tokenButton.resultKey ? 1.0 : 0.72)
-                            font.pixelSize: 12
+                                        === tokenButton.resultKey ? 1.0 : root.theme.textSecondary)
+                            font.family: root.theme.fontUi
+                            font.pixelSize: root.theme.fontSizeSmall
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
                         }
 
                         background: Rectangle {
-                            radius: 9
+                            radius: root.theme.radiusSmall
                             color: root.controller.activeTokenKey === tokenButton.resultKey
-                                   ? root.alpha(root.theme.primary, 0.22)
+                                   ? root.alpha(root.theme.primary, root.theme.stateSelected)
                                    : (tokenButton.hovered
-                                      ? root.alpha(root.theme.primary, 0.12)
+                                      ? root.alpha(root.theme.primary, root.theme.stateHover)
                                       : "transparent")
+                            border.color: tokenButton.timedOut
+                                          ? root.alpha(root.theme.error, root.theme.outlineOpacity)
+                                          : "transparent"
+                            border.width: tokenButton.timedOut ? root.theme.borderWidth : 0
                         }
 
                         onClicked: root.controller.selectTokenKey(resultKey)
@@ -254,16 +269,18 @@ Item {
         Item {
             id: metadata
             anchors.top: tokenStrip.bottom
+            anchors.topMargin: root.theme.spacingS
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.leftMargin: 18
-            anchors.rightMargin: 18
-            height: 34
+            anchors.leftMargin: root.theme.popoutPadding
+            anchors.rightMargin: root.theme.popoutPadding
+            height: Math.max(sourceLabel.implicitHeight, availabilityLabel.implicitHeight)
 
             Text {
+                id: sourceLabel
                 anchors.left: parent.left
                 anchors.right: availabilityLabel.left
-                anchors.rightMargin: 8
+                anchors.rightMargin: root.theme.spacingS
                 anchors.verticalCenter: parent.verticalCenter
                 text: {
                     var kind = root.controller.showRelated ? "Related" : "Exact"
@@ -277,8 +294,9 @@ Item {
                     return pieces.join(" · ")
                 }
                 color: root.theme.on_surface
-                opacity: 0.64
-                font.pixelSize: 11
+                opacity: root.theme.textSecondary
+                font.family: root.theme.fontUi
+                font.pixelSize: root.theme.fontSizeSmall
                 elide: Text.ElideRight
             }
 
@@ -286,21 +304,23 @@ Item {
                 id: availabilityLabel
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                width: Math.min(190, implicitWidth)
+                width: Math.min(root.theme.statusMaxWidth, implicitWidth)
+                property string incomplete: root.controller.incompleteLabel()
                 text: root.controller.activeTruncated()
                       || root.controller.activeFullRef() !== ""
                       ? (root.controller.activeFullChars() > 0
                          ? "Preview · full entry: "
                            + root.controller.activeFullChars() + " chars"
                          : "Preview · full entry available")
-                      : (root.controller.incompleteLabel() !== ""
-                         ? root.controller.incompleteLabel()
+                      : (incomplete !== ""
+                         ? incomplete
                          : (root.controller.unavailableModes.length > 0
                             ? "Unavailable: "
                               + root.controller.unavailableModes.join(", ") : ""))
-                color: root.theme.primary
-                opacity: 0.82
-                font.pixelSize: 10
+                color: incomplete !== "" && text === incomplete ? root.theme.error
+                                                                : root.theme.primary
+                font.family: root.theme.fontUi
+                font.pixelSize: root.theme.fontSizeSmall
                 elide: Text.ElideRight
                 horizontalAlignment: Text.AlignRight
             }
@@ -309,12 +329,13 @@ Item {
         Rectangle {
             id: divider
             anchors.top: metadata.bottom
+            anchors.topMargin: root.theme.spacingS
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.leftMargin: 16
-            anchors.rightMargin: 16
-            height: 1
-            color: root.alpha(root.theme.outline, 0.45)
+            anchors.leftMargin: root.theme.popoutPadding
+            anchors.rightMargin: root.theme.popoutPadding
+            height: root.theme.borderWidth
+            color: root.theme.dividerColor
         }
 
         Item {
@@ -323,12 +344,15 @@ Item {
             anchors.bottom: actions.top
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.margins: 16
+            anchors.topMargin: root.theme.gap
+            anchors.bottomMargin: root.theme.gap
+            anchors.leftMargin: root.theme.popoutPadding
+            anchors.rightMargin: root.theme.popoutPadding
 
             Column {
                 anchors.centerIn: parent
-                width: Math.min(parent.width, 260)
-                spacing: 14
+                width: Math.min(parent.width, root.theme.loadingWidth)
+                spacing: root.theme.gap
                 visible: root.controller.phase === "loading"
 
                 Text {
@@ -336,22 +360,23 @@ Item {
                     text: root.controller.queryText === ""
                           ? "Reading selected text…" : "Looking up locally…"
                     color: root.theme.on_surface
-                    opacity: 0.74
-                    font.pixelSize: 13
+                    opacity: root.theme.textSecondary
+                    font.family: root.theme.fontUi
+                    font.pixelSize: root.theme.fontSizeMedium
                     horizontalAlignment: Text.AlignHCenter
                 }
 
                 Rectangle {
                     width: parent.width
-                    height: 3
-                    radius: 2
-                    color: root.alpha(root.theme.outline, 0.28)
+                    height: root.theme.progressHeight
+                    radius: root.theme.radiusFull
+                    color: root.alpha(root.theme.outline, root.theme.outlineOpacity)
 
                     Rectangle {
                         id: loadingBar
                         width: parent.width * 0.32
                         height: parent.height
-                        radius: 2
+                        radius: root.theme.radiusFull
                         color: root.theme.primary
 
                         SequentialAnimation on x {
@@ -360,13 +385,13 @@ Item {
                             NumberAnimation {
                                 from: 0
                                 to: loadingBar.parent.width - loadingBar.width
-                                duration: 220
+                                duration: root.theme.loadingSweepDuration
                                 easing.type: Easing.InOutCubic
                             }
                             NumberAnimation {
                                 from: loadingBar.parent.width - loadingBar.width
                                 to: 0
-                                duration: 220
+                                duration: root.theme.loadingSweepDuration
                                 easing.type: Easing.InOutCubic
                             }
                         }
@@ -376,25 +401,27 @@ Item {
 
             Text {
                 anchors.centerIn: parent
-                width: Math.min(parent.width, 420)
+                width: Math.min(parent.width, root.theme.messageMaxWidth)
                 text: root.controller.errorText
                 visible: root.controller.phase === "error"
-                color: root.theme.on_surface
-                opacity: 0.85
-                font.pixelSize: 13
+                color: root.theme.error
+                font.family: root.theme.fontUi
+                font.pixelSize: root.theme.fontSizeMedium
                 wrapMode: Text.WordWrap
                 horizontalAlignment: Text.AlignHCenter
             }
 
             Text {
                 anchors.centerIn: parent
-                width: Math.min(parent.width, 420)
+                width: Math.min(parent.width, root.theme.messageMaxWidth)
                 text: root.controller.emptyStateMessage()
                 visible: root.controller.phase === "ready"
                          && root.controller.activeBody() === ""
                 color: root.theme.on_surface
-                opacity: 0.55
-                font.pixelSize: 13
+                opacity: root.theme.textTertiary
+                font.family: root.theme.fontUi
+                font.pixelSize: root.theme.fontSizeMedium
+                wrapMode: Text.WordWrap
                 horizontalAlignment: Text.AlignHCenter
             }
 
@@ -415,11 +442,10 @@ Item {
                     text: root.controller.activeBody()
                     textFormat: Text.PlainText
                     color: root.theme.on_surface
-                    font.pixelSize: root.hasCjkOrKana(root.controller.queryText)
-                                    ? 15 : 14
+                    font.family: root.theme.fontUi
+                    font.pixelSize: root.theme.fontSizeMedium
                     lineHeightMode: Text.ProportionalHeight
-                    lineHeight: root.hasCjkOrKana(root.controller.queryText)
-                                ? 1.48 : 1.40
+                    lineHeight: root.theme.bodyLineHeight
                     wrapMode: Text.Wrap
                 }
 
@@ -442,129 +468,95 @@ Item {
             anchors.bottom: parent.bottom
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.leftMargin: 16
-            anchors.rightMargin: 16
-            height: 50
+            anchors.margins: root.theme.popoutPadding
+            height: root.theme.controlHeight
 
             Row {
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: 6
+                spacing: root.theme.spacingS
                 visible: root.controller.phase === "ready"
                          && root.controller.hasRelated()
 
-                T.Button {
-                    id: exactButton
-                    implicitWidth: 70
-                    implicitHeight: 30
-                    hoverEnabled: true
+                Repeater {
+                    model: [false, true]
 
-                    contentItem: Text {
-                        text: "Exact"
-                        color: root.controller.showRelated
-                               ? root.theme.on_surface : root.theme.on_primary
-                        font.pixelSize: 11
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
+                    T.Button {
+                        id: relationButton
+                        required property bool modelData
+                        property bool selected: root.controller.showRelated === modelData
+                        implicitWidth: Math.max(root.theme.minControlWidth,
+                                                relationText.implicitWidth
+                                                + 2 * root.theme.spacingL)
+                        implicitHeight: root.theme.controlHeight
+                        hoverEnabled: true
+
+                        contentItem: Text {
+                            id: relationText
+                            text: relationButton.modelData ? "Related" : "Exact"
+                            color: relationButton.selected ? root.theme.on_primary
+                                                           : root.theme.on_surface
+                            font.family: root.theme.fontUi
+                            font.pixelSize: root.theme.fontSizeSmall
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        background: Rectangle {
+                            radius: root.theme.cornerRadius
+                            color: relationButton.selected
+                                   ? root.theme.primary
+                                   : (relationButton.hovered
+                                      ? root.alpha(root.theme.primary, root.theme.stateHover)
+                                      : "transparent")
+                        }
+
+                        onClicked: root.controller.setRelated(modelData)
                     }
-
-                    background: Rectangle {
-                        radius: 9
-                        color: !root.controller.showRelated
-                               ? root.theme.primary
-                               : (exactButton.hovered
-                                  ? root.alpha(root.theme.primary, 0.14)
-                                  : "transparent")
-                    }
-
-                    onClicked: root.controller.setRelated(false)
-                }
-
-                T.Button {
-                    id: relatedButton
-                    implicitWidth: 78
-                    implicitHeight: 30
-                    hoverEnabled: true
-
-                    contentItem: Text {
-                        text: "Related"
-                        color: root.controller.showRelated
-                               ? root.theme.on_primary : root.theme.on_surface
-                        font.pixelSize: 11
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-
-                    background: Rectangle {
-                        radius: 9
-                        color: root.controller.showRelated
-                               ? root.theme.primary
-                               : (relatedButton.hovered
-                                  ? root.alpha(root.theme.primary, 0.14)
-                                  : "transparent")
-                    }
-
-                    onClicked: root.controller.setRelated(true)
                 }
             }
 
             Row {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: 6
+                spacing: root.theme.spacingS
                 visible: root.controller.phase === "ready"
                          && root.controller.activeBody() !== ""
 
-                T.Button {
-                    id: copyButton
-                    implicitWidth: 68
-                    implicitHeight: 30
-                    hoverEnabled: true
+                Repeater {
+                    model: ["Copy", "Open full"]
 
-                    contentItem: Text {
-                        text: "Copy"
-                        color: root.theme.on_surface
-                        font.pixelSize: 11
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
+                    T.Button {
+                        id: actionButton
+                        required property string modelData
+                        implicitWidth: Math.max(root.theme.minControlWidth,
+                                                actionText.implicitWidth
+                                                + 2 * root.theme.spacingL)
+                        implicitHeight: root.theme.controlHeight
+                        hoverEnabled: true
+
+                        contentItem: Text {
+                            id: actionText
+                            text: actionButton.modelData
+                            color: root.theme.on_surface
+                            font.family: root.theme.fontUi
+                            font.pixelSize: root.theme.fontSizeSmall
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        background: Rectangle {
+                            radius: root.theme.cornerRadius
+                            color: actionButton.hovered
+                                   ? root.alpha(root.theme.primary, root.theme.stateHover)
+                                   : "transparent"
+                            border.color: root.theme.borderColor
+                            border.width: root.theme.borderWidth
+                        }
+
+                        onClicked: actionButton.modelData === "Copy"
+                                   ? root.copyRequested() : root.openFullRequested()
                     }
-
-                    background: Rectangle {
-                        radius: 9
-                        color: copyButton.hovered
-                               ? root.alpha(root.theme.primary, 0.16)
-                               : "transparent"
-                        border.color: root.theme.outline
-                        border.width: 1
-                    }
-
-                    onClicked: root.copyRequested()
-                }
-
-                T.Button {
-                    id: openButton
-                    implicitWidth: 88
-                    implicitHeight: 30
-                    hoverEnabled: true
-
-                    contentItem: Text {
-                        text: "Open full"
-                        color: root.theme.on_surface
-                        font.pixelSize: 11
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-
-                    background: Rectangle {
-                        radius: 9
-                        color: openButton.hovered
-                               ? root.alpha(root.theme.primary, 0.16)
-                               : "transparent"
-                        border.color: root.theme.outline
-                        border.width: 1
-                    }
-
-                    onClicked: root.openFullRequested()
                 }
             }
         }

@@ -527,6 +527,8 @@ def run_smoke(timeout: float) -> None:
                 "surface_container_high": "#2b292f",
                 "on_surface": "#e8e0e9",
                 "outline": "#958e99",
+                "error": "#ffb4ab",
+                "on_error": "#690005",
                 "dark": True,
             }, f"invalid matugen palette did not retain dark fallback: {theme}")
 

@@ -133,9 +133,10 @@ does not pretend to be complete Chinese or Japanese language identification.
 - fixed/min/max popup with scrollable plain-text definitions;
 - explicit source names and mode labels;
 - CJK headwords use the `Jigmo` Mincho font when installed (`ttf-jigmo`,
-  CC0), otherwise `Asebi Mincho`; set `DANK_LOOKUP_HEADWORD_FONT` to override.
-  Rare Ext B+ characters need fontconfig fallback to `Jigmo2`/`Jigmo3`;
-  `font.families` lists are not available in QML;
+  CC0), otherwise `Asebi Mincho`, which also sets other heading text; set
+  `DANK_LOOKUP_HEADWORD_FONT` to override the CJK headword font. Rare Ext B+
+  characters need fontconfig fallback to `Jigmo2`/`Jigmo3`; `font.families`
+  lists are not available in QML. UI text uses MiSans TC;
 - exact/related switch using the active displayed body;
 - token row consumes ordered `token_items` and supports duplicate token text;
 - query/mode/related/token changes reset scroll predictably;
@@ -153,16 +154,21 @@ JSON. Re-fetch can fail if dictionaries or routing change before Open full.
 
 ## Theme contract
 
-Standalone uses six colors plus a dark flag:
+Every colour, radius, spacing step, type size, font and elevation value is a
+token in `qml/LookupTheme.qml`, shared by standalone and the DMS wrapper; a lint
+test rejects literals elsewhere. The palette uses matugen role names:
 
 ```text
 primary, on_primary, surface, surface_container_high,
-on_surface, outline, dark
+on_surface, outline, error, on_error (+ mode/dark)
 ```
 
 Built-in light/dark palettes work without generated files. The installer ships
-generic matugen 4.x JSON templates; `DANK_LOOKUP_THEME_FILE` enables safe
-last-known-good reload. DMS tokens are mapped only inside the optional wrapper.
+complete matugen 4.x JSON templates; `DANK_LOOKUP_THEME_FILE` enables safe
+last-known-good reload. DMS Theme values are mapped onto token names only
+inside the optional wrapper. See [`docs/theming.md`](docs/theming.md) for the
+token layout, the DMS 2.0 baseline and the `~/.config/matugen/config.toml`
+section to add.
 
 ## Tests and benchmarks
 
@@ -189,6 +195,7 @@ python3 -m unittest -v \
   tests.test_cli \
   tests.test_core \
   tests.test_dependency_preflight \
+  tests.test_design_tokens \
   tests.test_fixture_runner \
   tests.test_packaging \
   tests.test_runtime \

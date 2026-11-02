@@ -155,15 +155,21 @@ if plugin["type"] == "launcher":
 for mapping in (
     "primary: Theme.primary",
     "on_primary: Theme.onPrimary",
-    "surface: Theme.surface",
+    "surface: Theme.hostSurface",
     "surface_container_high: Theme.surfaceContainerHigh",
     "on_surface: Theme.surfaceText",
-    "outline: Theme.outlineMedium",
+    "outline: Theme.outline\n",
+    "error: Theme.error",
+    "on_error: Theme.onError",
     "dark: !Theme.isLightMode",
+    "cornerRadius: Theme.cornerRadius",
+    "surfaceOpacity: Theme.popupTransparency",
     "Shared.LookupApplication",
-    "themeOverride: dmsTheme",
+    "themeHost: dmsTheme",
 ):
     assert mapping in dms_wrapper, mapping
+# outlineMedium is scaled by blurLayerOutlineOpacity (0 by default): invisible.
+assert ": Theme.outlineMedium" not in dms_wrapper
 PY
 }
 

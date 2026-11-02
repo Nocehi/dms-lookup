@@ -31,8 +31,14 @@ Item {
                                     || colors.surfaceContainerHigh,
             on_surface: colors.on_surface || colors.onSurface,
             outline: colors.outline,
-            dark: typeof document.dark === "boolean" ? document.dark
-                                                      : colors.dark
+            error: colors.error,
+            on_error: colors.on_error || colors.onError,
+            // matugen's {{mode}} ("dark"/"light") follows the generated scheme;
+            // the boolean is the fallback for files without it.
+            dark: document.mode === "dark" ? true
+                  : document.mode === "light" ? false
+                  : typeof document.dark === "boolean" ? document.dark
+                  : colors.dark
         }
     }
 
