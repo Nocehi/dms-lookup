@@ -20,6 +20,8 @@ import tempfile
 import time
 from typing import Any, Callable
 
+from quickshell_offscreen import launch_arguments, offscreen_environment
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 QML_ROOT = ROOT / "qml"
@@ -181,13 +183,7 @@ class Frontend:
     def start(self) -> None:
         self.log_handle = self.log_path.open("wb")
         self.process = subprocess.Popen(
-            [
-                self.quickshell,
-                "-p",
-                str(self.config),
-                "--allow-duplicate",
-                "--no-color",
-            ],
+            launch_arguments(self.quickshell, "-p", str(self.config)),
             stdin=subprocess.DEVNULL,
             stdout=self.log_handle,
             stderr=subprocess.STDOUT,
@@ -493,9 +489,7 @@ def run_smoke(timeout: float) -> None:
         invalid_theme = temp / "invalid-theme.json"
         invalid_theme.write_text('{"primary":"not-a-colour"}\n', encoding="utf-8")
 
-        env = os.environ.copy()
-        env.pop("DISPLAY", None)
-        env.pop("WAYLAND_DISPLAY", None)
+        env = offscreen_environment(os.environ)
         env.update(
             {
                 "HOME": str(home),
@@ -503,7 +497,6 @@ def run_smoke(timeout: float) -> None:
                 "XDG_DATA_HOME": str(home / ".local/share"),
                 "XDG_CACHE_HOME": str(home / ".cache"),
                 "XDG_RUNTIME_DIR": str(runtime),
-                "QT_QPA_PLATFORM": "offscreen",
                 "DANK_LOOKUP_ENABLE_MOCK_IPC": "1",
                 "DANK_LOOKUP_BENCHMARK": "1",
                 "DANK_LOOKUP_THEME_VARIANT": "dark",
