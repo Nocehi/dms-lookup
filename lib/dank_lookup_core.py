@@ -160,6 +160,7 @@ _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _TRAILING_HORIZONTAL_SPACE = re.compile(r"[ \t]+(?=\n|$)")
 _IFO_MAX_BYTES = 1024 * 1024
 _IFO_MAX_FILES = 2048
+_IFO_MAX_DIRECTORIES = 4096
 
 
 def _normalise_definition_text(dictionary_name: str, text: str) -> str:
@@ -231,6 +232,32 @@ def _configured_data_directories(
     return directories
 
 
+def _ifo_files(directory: pathlib.Path) -> Iterable[pathlib.Path]:
+    """Yield ``*.ifo`` files under ``directory`` the way sdcv finds them.
+
+    sdcv loads dictionaries from every subdirectory of a data dir, at any
+    depth and through symlinked directories (verified on sdcv 0.5.5), so a
+    dictionary in ``dic/wangli/wangli.ifo`` is found. Unlike sdcv, a symlink
+    loop is visited once, and the walk is bounded.
+    """
+
+    visited: set[str] = set()
+    walked = 0
+    for current, subdirectories, filenames in os.walk(directory, followlinks=True):
+        real = os.path.realpath(current)
+        if real in visited:
+            subdirectories[:] = []
+            continue
+        visited.add(real)
+        walked += 1
+        if walked > _IFO_MAX_DIRECTORIES:
+            return
+        subdirectories.sort()
+        for filename in sorted(filenames):
+            if filename.endswith(".ifo"):
+                yield pathlib.Path(current) / filename
+
+
 def _read_ifo_metadata(path: pathlib.Path) -> dict[str, str] | None:
     try:
         if not path.is_file() or path.stat().st_size > _IFO_MAX_BYTES:
@@ -264,11 +291,11 @@ def resolve_definition_format(
     seen_paths: set[str] = set()
     for directory in _configured_data_directories(source, config):
         try:
-            candidates = sorted(directory.glob("*.ifo"), key=lambda item: item.name)
+            candidates = list(_ifo_files(directory))
         except OSError:
             continue
         for path in candidates:
-            identity = os.path.abspath(os.fspath(path))
+            identity = os.path.realpath(os.fspath(path))
             if identity in seen_paths:
                 continue
             seen_paths.add(identity)

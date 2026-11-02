@@ -1357,6 +1357,55 @@ class DefinitionFormatTests(unittest.TestCase):
                 resolve_definition_format({"name": "html fixture"}, config), "plain"
             )
 
+    def test_ifo_in_nested_subdirectories_is_detected_like_sdcv(self):
+        # sdcv 0.5.5 loads dictionaries from subdirectories at any depth (the
+        # user's dic/wangli/wangli.ifo, dic/cc-cedict/cc-cedict.ifo …).
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "wangli").mkdir()
+            (root / "a/b/c").mkdir(parents=True)
+            self._ifo(root / "wangli", "wangli.ifo", "Nested HTML", "h")
+            self._ifo(root / "a/b/c", "deep.ifo", "Deep HTML", "h")
+            self._ifo(root / "a", "plain.ifo", "Nested Plain", "m")
+            config = {"stardict_data_dir": [str(root)]}
+            self.assertEqual(resolve_definition_format({"name": "Nested HTML"}, config), "html")
+            self.assertEqual(resolve_definition_format({"name": "Deep HTML"}, config), "html")
+            self.assertEqual(resolve_definition_format({"name": "Nested Plain"}, config), "plain")
+            self.assertEqual(
+                resolve_definition_format({"name": "Nested HTML", "data_dir": str(root)}, {}),
+                "html",
+            )
+
+    def test_symlinked_directories_are_followed_once(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other:
+            root = pathlib.Path(directory)
+            linked = pathlib.Path(other)
+            self._ifo(linked, "linked.ifo", "Linked HTML", "h")
+            (root / "dictionaries").mkdir()
+            (root / "dictionaries/link").symlink_to(linked, target_is_directory=True)
+            # A loop back to the data dir must neither hang nor count twice.
+            (root / "dictionaries/loop").symlink_to(root, target_is_directory=True)
+            self._ifo(root, "top.ifo", "Top HTML", "h")
+            config = {"stardict_data_dir": [str(root)]}
+            self.assertEqual(resolve_definition_format({"name": "Linked HTML"}, config), "html")
+            self.assertEqual(resolve_definition_format({"name": "Top HTML"}, config), "html")
+            # The same .ifo reached through two paths is one source, not a
+            # conflict with itself.
+            (root / "again").symlink_to(linked, target_is_directory=True)
+            self.assertEqual(resolve_definition_format({"name": "Linked HTML"}, config), "html")
+
+    def test_nested_conflicting_ifo_still_falls_back_plain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "one").mkdir()
+            (root / "two").mkdir()
+            self._ifo(root / "one", "x.ifo", "Twin", "h")
+            self._ifo(root / "two", "x.ifo", "Twin", "m")
+            self.assertEqual(
+                resolve_definition_format({"name": "Twin"}, {"stardict_data_dir": [str(root)]}),
+                "plain",
+            )
+
     def test_conflict_mixed_missing_and_no_sametype_fall_back_plain(self):
         cases = {
             "conflict": [("a.ifo", "h"), ("b.ifo", "m")],
