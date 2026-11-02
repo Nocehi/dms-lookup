@@ -496,7 +496,7 @@ class SdcvClient:
         stdout_cap_bytes: int = DEFAULT_STDOUT_CAP_BYTES,
         stderr_cap_bytes: int = STDERR_CAP_BYTES,
         session_factory: Callable[..., Any] | None = None,
-        fuzzy_in_exact_session: bool = False,
+        fuzzy_in_exact_session: bool = True,
         session_scope: str = "lookup",
     ) -> None:
         self.executable = executable or os.environ.get("DANK_LOOKUP_SDCV", "sdcv")
@@ -514,9 +514,11 @@ class SdcvClient:
         else:
             self.session_factory = SdcvSession
         # sdcv routes a "/query" to its fuzzy search regardless of
-        # --exact-search (libwrapper.cpp process_phrase, case qtFUZZY), so
-        # one exact session could serve both; keep a separate non-exact
-        # session until the stdin gate has proven that frame on real sdcv.
+        # --exact-search (libwrapper.cpp process_phrase, case qtFUZZY), so one
+        # --exact-search session serves exact and fuzzy frames alike; proven
+        # on sdcv 0.5.5 by tests/probe_sdcv_session.py
+        # (session_fuzzy_under_exact_search). False keeps a separate
+        # non-exact session per source.
         self.fuzzy_in_exact_session = bool(fuzzy_in_exact_session)
         # "lookup": sessions stay open across query() calls (every token of a
         # segmented lookup reuses them) until lookup() calls close();

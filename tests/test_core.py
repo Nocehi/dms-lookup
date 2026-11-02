@@ -1105,8 +1105,8 @@ class SdcvSessionTests(unittest.TestCase):
 
     def test_client_runs_one_process_per_source_and_search_kind(self):
         # exact + ten fuzzy candidates + their exact re-queries used to cost
-        # 12 processes per source; a session costs one per search kind.
-        client = SdcvClient(executable=str(self.fake), timeout=2.0)
+        # 12 processes per source; split sessions cost one per search kind.
+        client = SdcvClient(executable=str(self.fake), timeout=2.0, fuzzy_in_exact_session=False)
         client.environment["FAKE_CALL_LOG"] = str(self.call_log)
         entries, warning = client.query({"name": "Gcide", "exact_only": False}, "Linux", candidates="all")
         self.assertIsNone(warning)
@@ -1122,8 +1122,8 @@ class SdcvSessionTests(unittest.TestCase):
         self.assertEqual(client._sessions, {})
         self.assertEqual([log["session_frames"] for log in client.session_log], [11, 1])
 
-    def test_client_can_share_one_session_for_exact_and_fuzzy_frames(self):
-        client = SdcvClient(executable=str(self.fake), timeout=2.0, fuzzy_in_exact_session=True)
+    def test_client_shares_one_session_for_exact_and_fuzzy_frames_by_default(self):
+        client = SdcvClient(executable=str(self.fake), timeout=2.0)
         client.environment["FAKE_CALL_LOG"] = str(self.call_log)
         entries, warning = client.query({"name": "Gcide", "exact_only": False}, "Linux", candidates="all")
         client.close()
@@ -1162,12 +1162,19 @@ class SdcvSessionTests(unittest.TestCase):
         self.assertIsNone(result["error"])
         self.assertEqual(result["available_modes"], ["en"])
         self.assertIn("Linux0", result["related_by_mode"]["en"]["body"])
-        self.assertEqual(len(self._processes()), 4)
+        # One --exact-search session per source serves exact and fuzzy frames.
+        self.assertEqual(
+            self._processes(),
+            [
+                "--json --utf8-input --utf8-output --exact-search --use-dict Gcide",
+                "--json --utf8-input --utf8-output --exact-search --use-dict WordNet",
+            ],
+        )
         self.assertEqual(client._sessions, {})
 
     def test_sessions_survive_across_queries_until_close(self):
         # Every token of a segmented lookup reuses the source's session.
-        client = SdcvClient(executable=str(self.fake), timeout=2.0)
+        client = SdcvClient(executable=str(self.fake), timeout=2.0, fuzzy_in_exact_session=False)
         client.environment["FAKE_CALL_LOG"] = str(self.call_log)
         for query in ("Linux", "Linux", "nothing"):
             client.query({"name": "Gcide", "exact_only": False}, query, candidates="all")
@@ -1176,7 +1183,9 @@ class SdcvSessionTests(unittest.TestCase):
         self.assertEqual(len(self._processes()), 2)
         self.assertEqual(client._sessions, {})
 
-        client = SdcvClient(executable=str(self.fake), timeout=2.0, session_scope="query")
+        client = SdcvClient(
+            executable=str(self.fake), timeout=2.0, session_scope="query", fuzzy_in_exact_session=False
+        )
         client.environment["FAKE_CALL_LOG"] = str(self.call_log)
         client.query({"name": "Gcide", "exact_only": True}, "Linux", candidates="variants")
         self.assertEqual(client._sessions, {})

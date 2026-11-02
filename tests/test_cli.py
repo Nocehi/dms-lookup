@@ -54,17 +54,20 @@ class CliTests(unittest.TestCase):
                     exit 0
                 fi
             done
-            printf '%s' 'Enter word or phrase: '
-            IFS= read -r query
-            printf '%s\\n' "$query"
-            if [ -n "${FAKE_INVALID:-}" ]; then
-                printf '%s\\n' 'not json'
-            elif [ -n "${FAKE_NO_HIT:-}" ]; then
-                printf '%s\\n' '[]'
-            else
-                printf '[{"dict":"FixtureDict","word":"%s","definition":"safe definition"}]\\n' "$query"
-            fi
-            printf '%s\\n' 'Enter word or phrase: '
+            # Like sdcv 0.5.5's interactive loop: answer queries until stdin
+            # EOF (one process serves every frame of a lookup session).
+            while :; do
+                printf '%s' 'Enter word or phrase: '
+                IFS= read -r query || { printf '\\n'; exit 0; }
+                printf '%s\\n' "$query"
+                if [ -n "${FAKE_INVALID:-}" ]; then
+                    printf '%s\\n' 'not json'
+                elif [ -n "${FAKE_NO_HIT:-}" ]; then
+                    printf '%s\\n' '[]'
+                else
+                    printf '[{"dict":"FixtureDict","word":"%s","definition":"safe definition"}]\\n' "$query"
+                fi
+            done
             """,
         )
         self.giant_fake = write_executable(
@@ -79,14 +82,20 @@ class CliTests(unittest.TestCase):
                 print("Dictionary's name   Word count")
                 print("FixtureDict    2")
                 raise SystemExit(0)
-            sys.stdout.write("Enter word or phrase: ")
-            sys.stdout.flush()
-            query = sys.stdin.readline().rstrip("\\n")
-            sys.stdout.write(query + "\\n")
+            # Answer queries until stdin EOF, like sdcv 0.5.5.
             size = int(os.environ["FAKE_DEFINITION_SIZE"])
-            definition = "x" * size + "GIANT-COMPLETE-TAIL"
-            print(json.dumps([{"dict": "FixtureDict", "word": query, "definition": definition}]))
-            print("Enter word or phrase: ")
+            while True:
+                sys.stdout.write("Enter word or phrase: ")
+                sys.stdout.flush()
+                line = sys.stdin.readline()
+                if not line:
+                    print()
+                    break
+                query = line.rstrip("\\n")
+                sys.stdout.write(query + "\\n")
+                definition = "x" * size + "GIANT-COMPLETE-TAIL"
+                print(json.dumps([{"dict": "FixtureDict", "word": query, "definition": definition}]))
+                sys.stdout.flush()
             """,
         )
         self.config = self.root / "config.json"
