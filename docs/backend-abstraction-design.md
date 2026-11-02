@@ -175,3 +175,41 @@ core 先回傳 exact，Related（fuzzy ＋ 候選回查）在使用者展開時�
 - stdout cap 的語義：現在是每個 lookup 的總量在 `SdcvClient.query()` 內逐程序扣減；改為會話後，cap 應改為會話總量，並在超出時 kill 會話、保留已解析 frame，警告碼不變。
 - `source_timeout_ms`（現 1.5 s）現在是每程序逾時；改為會話後建議改為每 frame 逾時，整體仍受 `lookup_timeout_ms` 約束。
 - 需要在裝置上確認目前安裝的 sdcv 是否連結 readline（`ldd $(command -v sdcv) | grep readline`），這決定 B 的記憶體歷史問題是否實際存在，以及提示是否回顯查詢（現有 parser 假設回顯）。
+
+## 8. 實作狀態（2026-11-02，雲端分支 `claude/project-thread-901dgd`，基底 f64ac87）
+
+已實作方案 A 的第一步，改動限於 stdin 模組、`SdcvClient` 與 `lookup()` 的收尾：
+
+| 檔案 | 改動 |
+|---|---|
+| `lib/dank_lookup_sdcv_stdin.py` | `parse_protocol_stdout()` 拆出 `parse_frame()`（解析兩個主提示之間的一個 frame）；新增 `SdcvSession`（`ask(query, choice, timeout, cap)` → `(run, frame)`，`close()`）。`run_bounded_protocol()` 原樣保留，gate 與 `fixtures-sdcv-stdin` 不受影響。 |
+| `lib/dank_lookup_core.py` | `SdcvClient` 以 `(字典, data_dir, exact 旗標)` 為鍵維持會話；`_stdin_query()` 改為 `session.ask()`；`query()` 的政策（exact → 同形詞 → `/fuzzy` → 候選回查、`candidates` 篩選、cap、預算）逐行不變。會話預設存活到 `lookup()` 結束（`session_scope="lookup"`），所以分詞後每個 token 共用同一組程序；`lookup()` 在 `finally` 呼叫 `client.close()`，關閉異常以 `sdcv_reap_failed`／`sdcv_execution_failed` 警告呈現。注入 `protocol_runner` 的測試替身經 `_OneShotSession` 包裝，既有 fake 不用改。 |
+| `tests/test_core.py` | `SdcvSessionTests`：同程序多 frame、choice、`-1` 中止、frame 逾時後重啟、stdout cap、每來源程序數、跨 query 共用會話。 |
+| `tests/probe_sdcv_session.py` | 新探針，對真 sdcv 0.5.5 以隔離字典證明：同程序 exact→fuzzy→候選→miss；`--exact-search` 下 `/fuzzy` 仍列候選；同形詞 `-1` 中止後逐 index 取回。**需在 Nocehi 電腦執行**，雲端容器無 sdcv。 |
+
+程序數（假 sdcv 計數，`tests/test_core.py::SdcvSessionTests`）：
+
+| 情境 | c2cef49 | 本實作 | `fuzzy_in_exact_session=True` |
+|---|---|---|---|
+| 一個 `exact_only: false` 來源，exact 命中 ＋ 10 個候選 | 12 | 2 | 1 |
+| `exact_only: true` 來源，同形詞 2 條 | 3 | 1 | 1 |
+| 「Linux」，GCIDE ＋ WordNet | 21 | 6（含 `--list-dicts` ×2） | 4 |
+| 分詞 8 token × 同一組來源 | 每 token 重開 | 每來源一組，跨 token 共用 | 同左 |
+
+`fuzzy_in_exact_session` 預設關閉：sdcv 原始碼顯示 `/` 查詢不受 `--exact-search` 影響（`libwrapper.cpp` `process_phrase` 的 `qtFUZZY` 分支），但現行 gate 只證明過不帶 `-e` 的模糊 frame；`probe_sdcv_session.py` 的 `session_fuzzy_under_exact_search` 通過後即可改預設。
+
+雲端容器無法執行的驗證：`probe_sdcv_stdin.py` gate、`probe_sdcv_session.py`、`run_backend_fixtures.py`（需要真字典）、`benchmark_lookup.py`。容器內 `test_cli`／`test_transport` 有 6 個與本改動無關的既有失敗（`posix_spawn: setsid unavailable`、程序群組無法回收），改動前後相同。
+
+## 9. 現階段仍存在的 bottleneck
+
+以 c2cef49 的量測（Linux 267 ms、春 179 ms、中文長句 1.2 s）與每個 sdcv 程序約 10–15 ms 的固定成本推算：
+
+1. **每請求仍要重新啟動程序**：單詞查詢的下限約為「`--list-dicts` ×data_dir 數 ＋ 每來源 1–2 個程序」× 10–15 ms，即 Linux 約 50–70 ms，與 v0.7.1 的 47 ms 同級但不會更低。要再降只能（a）每個 data_dir 一個程序（`--use-dict` 多字典，候選行按字典名分流，預估 Linux 約 30 ms）或（b）常駐（方案 B，約 10–20 ms，見 §5 的私隱代價）。
+2. **`--list-dicts` 每請求兩個程序**：`source_installed()` 的快取只在 `SdcvClient` 實例內，one-shot backend 每次新建實例。sdcv 掃描 data_dir 內所有 `.ifo`，約 10 ms × 2。可改為讀 `.ifo` 的 `bookname` 自行判斷（core 已有 `_read_ifo_metadata()`），零程序。
+3. **sdcv 自身的模糊搜尋**：`LookupWithFuzzy` 對整個詞表逐詞算編輯距離（`stardict_lib.cpp:1347`），GCIDE／WordNet 規模下每次數十毫秒，且 `exact_only: false` 的來源每次都做。這是 `en` 模式比其他模式慢的主因，會話化之後仍在；方案 D（Related 延遲載入）或純 Python 前綴索引才能避開。
+4. **CJK 查詢仍跑 en-en 的 fallback 模糊搜尋**（v1 config 語義，phase2 §6 第 4 點），每次多 2 個程序 ＋ 2 次全詞表編輯距離。屬 config 政策，不在後端層。
+5. **分詞路徑**：tokenizer 本身一個程序，加上每 token 的 frame 數（來源數 × 1–3 frame）。會話化後長句估計由 1.2 s 降到 0.3 s 以下，剩餘主要是 tokenizer 啟動與 frame 的串行等待；frame 之間可考慮並行多個來源的會話（目前串行）。
+6. **逾時粒度**：`source_timeout_ms` 現在是每 frame 逾時；一個卡住的 frame 會 kill 整個會話並在下一個 frame 重啟（成本等同舊行為），不會更差，但也沒有更好。
+7. **同形詞仍需「中止 ＋ 逐 index 回查」**：互動模式無法一次印出同字典多條結果，每多一條同形詞多一個 frame（約 1 ms），已不是瓶頸。
+
+建議的下一步順序：先在裝置上跑 `probe_sdcv_session.py` 與 `benchmark_lookup.py` 取得實測；通過後開啟 `fuzzy_in_exact_session`；再做第 2 點（免程序的 `--list-dicts`）與第 1(a) 點。

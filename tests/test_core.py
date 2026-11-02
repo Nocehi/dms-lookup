@@ -37,7 +37,9 @@ from dank_lookup_core import (  # noqa: E402
 from dank_lookup_sdcv_stdin import (  # noqa: E402
     STDERR_CAP_BYTES,
     SdcvProtocolError,
+    SdcvSession,
     parse_empty_eof,
+    parse_frame,
     parse_protocol_stdout,
     protocol_argv,
     run_bounded_protocol,
@@ -969,6 +971,216 @@ class StdinAdapterTests(unittest.TestCase):
                     )
                     self.assertGreaterEqual(observed, 896 * 1024)
                     self.assertLessEqual(observed, 2 * 1024 * 1024)
+
+
+FAKE_SESSION_SDCV = """
+# Interactive fake sdcv: --list-dicts, else prompt/echo/JSON until stdin EOF.
+# "/q" lists ten candidates behind a choice prompt; "為" has two homographs.
+for argument do
+    if [ "$argument" = "--list-dicts" ]; then
+        printf "%s\\n" "Dictionary's name   Word count" "Gcide    1" "WordNet    1"
+        exit 0
+    fi
+done
+dict=Gcide
+previous=""
+for argument do
+    [ "$previous" = "--use-dict" ] && dict=$argument
+    previous=$argument
+done
+printf '%s %s\\n' "$$" "$*" >> "$FAKE_CALL_LOG"
+while :; do
+    printf 'Enter word or phrase: '
+    IFS= read -r query || { printf '\\n'; exit 0; }
+    printf '%s\\n' "$query"
+    case "$query" in
+        /*)
+            word=${query#/}
+            printf '['
+            index=0
+            while [ $index -lt 10 ]; do
+                printf '%s)%s-->%s%s\\n' $index "$dict" "$word" $index
+                index=$((index+1))
+            done
+            printf 'Your choice[-1 to abort]: '
+            IFS= read -r choice || exit 0
+            printf '%s\\n' "$choice"
+            if [ "$choice" = "-1" ]; then printf ']\\n'
+            else printf '{"dict":"%s","word":"%s%s","definition":"fuzzy"}]\\n' "$dict" "$word" "$choice"; fi
+            ;;
+        為)
+            printf '[0)%s-->為\\n1)%s-->為\\nYour choice[-1 to abort]: ' "$dict" "$dict"
+            IFS= read -r choice || exit 0
+            printf '%s\\n' "$choice"
+            if [ "$choice" = "-1" ]; then printf ']\\n'
+            else printf '{"dict":"%s","word":"為","definition":"wai%s"}]\\n' "$dict" "$choice"; fi
+            ;;
+        slow)
+            sleep 5
+            ;;
+        Linux)
+            printf '[{"dict":"%s","word":"Linux","definition":"os"}]\\n' "$dict"
+            ;;
+        Linux[0-9])
+            printf '[{"dict":"%s","word":"%s","definition":"candidate"}]\\n' "$dict" "$query"
+            ;;
+        *)
+            printf '[]\\n'
+            ;;
+    esac
+done
+"""
+
+
+class SdcvSessionTests(unittest.TestCase):
+    """One sdcv process answers several stdin frames (plan A batch session)."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.directory.name)
+        self.fake = write_shell(self.root / "session-sdcv", FAKE_SESSION_SDCV)
+        self.call_log = self.root / "calls"
+        self.environment = dict(os.environ, FAKE_CALL_LOG=str(self.call_log))
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def _processes(self):
+        if not self.call_log.exists():
+            return []
+        return [line.split(" ", 1)[1] for line in self.call_log.read_text(encoding="utf-8").splitlines()]
+
+    def test_session_serves_exact_choice_and_abort_frames_in_one_process(self):
+        session = SdcvSession(name="sdcv", argv=[str(self.fake)], environment=self.environment)
+        run, frame = session.ask("Linux", timeout_seconds=2.0)
+        self.assertIsNone(run["termination_reason"])
+        self.assertTrue(run["session_alive"])
+        self.assertEqual(parse_frame(frame, query="Linux")["entries"][0]["definition"], "os")
+
+        run, frame = session.ask("/Linux", choice=0, timeout_seconds=2.0)
+        self.assertEqual(run["choice_prompt_count"], 1)
+        parsed = parse_frame(frame, query="/Linux", choice=0)
+        self.assertEqual([item["word"] for item in parsed["options"]][:2], ["Linux0", "Linux1"])
+        self.assertEqual(parsed["entries"][0]["word"], "Linux0")
+
+        run, frame = session.ask("為", timeout_seconds=2.0)
+        self.assertTrue(run["choice_aborted"])
+        parsed = parse_frame(frame, query="為", choice=-1)
+        self.assertEqual(parsed["entries"], [])
+        self.assertEqual(len(parsed["options"]), 2)
+
+        run, frame = session.ask("為", choice=1, timeout_seconds=2.0)
+        self.assertEqual(parse_frame(frame, query="為", choice=1)["entries"][0]["definition"], "wai1")
+
+        closed = session.close()
+        self.assertEqual(closed["returncode"], 0)
+        self.assertIsNone(closed["termination_reason"])
+        self.assertEqual(closed["session_frames"], 4)
+        self.assertEqual(closed["session_starts"], 1)
+        self.assertEqual(len(self._processes()), 1)
+
+    def test_session_frame_timeout_kills_process_and_next_ask_restarts(self):
+        session = SdcvSession(name="sdcv", argv=[str(self.fake)], environment=self.environment)
+        started = time.monotonic()
+        run, _frame = session.ask("slow", timeout_seconds=0.2)
+        # 0.2 s frame timeout plus at most 1 s of process-group reap polling.
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertEqual(run["termination_reason"], "timeout")
+        self.assertFalse(run["session_alive"])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(run["pid"], 0)
+
+        run, frame = session.ask("Linux", timeout_seconds=2.0)
+        self.assertIsNone(run["termination_reason"])
+        self.assertTrue(run["session_restarted"])
+        self.assertEqual(parse_frame(frame, query="Linux")["entries"][0]["word"], "Linux")
+        session.close()
+        self.assertEqual(len(self._processes()), 2)
+
+    def test_session_frame_stdout_cap_is_reported(self):
+        session = SdcvSession(name="sdcv", argv=[str(self.fake)], environment=self.environment)
+        run, _frame = session.ask("/Linux", choice=0, timeout_seconds=2.0, stdout_cap_bytes=16)
+        self.assertEqual(run["termination_reason"], "stdout_cap")
+        session.close()
+
+    def test_client_runs_one_process_per_source_and_search_kind(self):
+        # exact + ten fuzzy candidates + their exact re-queries used to cost
+        # 12 processes per source; a session costs one per search kind.
+        client = SdcvClient(executable=str(self.fake), timeout=2.0)
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        entries, warning = client.query({"name": "Gcide", "exact_only": False}, "Linux", candidates="all")
+        self.assertIsNone(warning)
+        self.assertEqual([entry["word"] for entry in entries], ["Linux"] + [f"Linux{i}" for i in range(10)])
+        self.assertEqual(
+            self._processes(),
+            [
+                "--json --utf8-input --utf8-output --exact-search --use-dict Gcide",
+                "--json --utf8-input --utf8-output --use-dict Gcide",
+            ],
+        )
+        self.assertIsNone(client.close())
+        self.assertEqual(client._sessions, {})
+        self.assertEqual([log["session_frames"] for log in client.session_log], [11, 1])
+
+    def test_client_can_share_one_session_for_exact_and_fuzzy_frames(self):
+        client = SdcvClient(executable=str(self.fake), timeout=2.0, fuzzy_in_exact_session=True)
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        entries, warning = client.query({"name": "Gcide", "exact_only": False}, "Linux", candidates="all")
+        client.close()
+        self.assertIsNone(warning)
+        self.assertEqual(len(entries), 11)
+        self.assertEqual(self._processes(), ["--json --utf8-input --utf8-output --exact-search --use-dict Gcide"])
+
+    def test_client_homographs_are_fetched_within_the_session(self):
+        client = SdcvClient(executable=str(self.fake), timeout=2.0)
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        entries, warning = client.query({"name": "Gcide", "exact_only": True}, "為", candidates="variants")
+        client.close()
+        self.assertIsNone(warning)
+        self.assertEqual([entry["definition"] for entry in entries], ["wai0", "wai1"])
+        self.assertEqual(len(self._processes()), 1)
+
+    def test_lookup_counts_processes_per_source_not_per_candidate(self):
+        config = {
+            "version": 2,
+            "modes": {
+                "en": {
+                    "label": "EN",
+                    "default_for": ["latin"],
+                    "sources": [
+                        {"name": "Gcide", "when": "any", "exact_only": False},
+                        {"name": "WordNet", "when": "any", "exact_only": False},
+                    ],
+                }
+            },
+        }
+        path = self.root / "config.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        client = SdcvClient(executable=str(self.fake), timeout=2.0)
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        result, _vault = lookup("Linux", config_path=path, client=client)
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["available_modes"], ["en"])
+        self.assertIn("Linux0", result["related_by_mode"]["en"]["body"])
+        self.assertEqual(len(self._processes()), 4)
+        self.assertEqual(client._sessions, {})
+
+    def test_sessions_survive_across_queries_until_close(self):
+        # Every token of a segmented lookup reuses the source's session.
+        client = SdcvClient(executable=str(self.fake), timeout=2.0)
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        for query in ("Linux", "Linux", "nothing"):
+            client.query({"name": "Gcide", "exact_only": False}, query, candidates="all")
+        self.assertEqual(len(client._sessions), 2)
+        self.assertIsNone(client.close())
+        self.assertEqual(len(self._processes()), 2)
+        self.assertEqual(client._sessions, {})
+
+        client = SdcvClient(executable=str(self.fake), timeout=2.0, session_scope="query")
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        client.query({"name": "Gcide", "exact_only": True}, "Linux", candidates="variants")
+        self.assertEqual(client._sessions, {})
+        self.assertEqual(len(self._processes()), 4)
 
 
 class SdcvStdinProbeParserTests(unittest.TestCase):
