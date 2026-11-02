@@ -6,7 +6,8 @@ normal selection → popup → local dictionary path.
 ## Prerequisites
 
 - niri (or another Wayland compositor);
-- Quickshell/noctalia-qs with `IpcHandler` support;
+- Quickshell 0.3.x (or the noctalia-qs fork) with `IpcHandler` support and
+  Qt 6.9 or newer (`QtQuick.Effects.RectangularShadow`);
 - `wl-paste` and `wl-copy` from `wl-clipboard`;
 - Python 3, `sdcv`, and any dictionaries you are licensed to use;
 - `xdg-open` for the optional Open full action.
