@@ -58,6 +58,18 @@ def load_json(path: pathlib.Path) -> Any:
         return json.load(handle)
 
 
+def serialize_report(report: dict[str, Any]) -> str:
+    return (
+        json.dumps(
+            report,
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+
+
 def parse_sdcv_version(version_raw: str) -> str:
     version_match = SDCV_VERSION_PATTERN.search(version_raw)
     return version_match.group(1) if version_match is not None else ""
@@ -85,6 +97,7 @@ def build_gate_report(
         "verdict": "pass" if not gate_errors else "fail",
         "sdcv_version": parsed_version,
         "sdcv_version_raw": version_raw,
+        "sdcv_version_returncode": version_returncode,
         "stdout_cap_bytes": DEFAULT_CAP_BYTES,
         "stderr_cap_bytes": STDERR_CAP_BYTES,
         "history_environment": {"SDCV_HISTFILE": "/dev/null", "SDCV_HISTSIZE": "0"},
@@ -628,7 +641,7 @@ def discover(args: argparse.Namespace) -> int:
         "cases": results,
     }
     report_path = evidence_dir / "report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report_path.write_text(serialize_report(report), encoding="utf-8")
     print(report_path)
     for result in results:
         print(
@@ -674,6 +687,205 @@ def normalized_definitions(parsed: dict[str, Any]) -> list[str]:
     return [str(item.get("definition", "")).removeprefix("\n") for item in parsed["entries"]]
 
 
+def run_completed_gate_case(
+    *,
+    sdcv: str,
+    data_root: pathlib.Path,
+    environment: dict[str, str],
+    evidence_dir: pathlib.Path,
+    name: str,
+    query: str,
+    dictionaries: list[str],
+    exact: bool,
+    expected_definitions: list[str],
+    choice: int | None = None,
+    expected_headwords: list[str] | None = None,
+    close_after_query: bool = False,
+    inspect_query_cmdline: bool = False,
+    stdout_cap_bytes: int = DEFAULT_CAP_BYTES,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    result, stdout = production_run_bounded_protocol(
+        name=name,
+        argv=production_protocol_argv(
+            sdcv,
+            data_dir=str(data_root),
+            dictionaries=dictionaries,
+            exact=exact,
+        ),
+        environment=environment,
+        evidence_dir=evidence_dir,
+        query=query,
+        choice=choice,
+        close_after_query=close_after_query,
+        timeout_seconds=8.0,
+        stdout_cap_bytes=stdout_cap_bytes,
+        inspect_query_cmdline=inspect_query_cmdline,
+    )
+    errors: list[str] = []
+    parsed: dict[str, Any] | None = None
+    if result["termination_reason"] is not None:
+        errors.append(f"unexpected termination: {result['termination_reason']}")
+    if result["returncode"] != 0:
+        errors.append(f"unexpected return code: {result['returncode']}")
+    if result["stderr_bytes"] != 0:
+        errors.append(f"unexpected stderr bytes: {result['stderr_bytes']}")
+    if not result["process_group_reaped"]:
+        errors.append("process group was not fully reaped")
+    if query in result["argv_metadata"]:
+        errors.append("query appeared as an argv element")
+    try:
+        parsed = production_parse_protocol_stdout(stdout, query=query, choice=choice)
+    except ProductionProtocolError as exc:
+        errors.append(str(exc))
+    if parsed is not None:
+        actual_definitions = normalized_definitions(parsed)
+        if actual_definitions != expected_definitions:
+            errors.append("definitions did not match isolated expected results")
+        if expected_headwords is not None:
+            actual_headwords = [
+                str(item.get("word", "")) for item in parsed["entries"]
+            ]
+            if actual_headwords != expected_headwords:
+                errors.append("headwords did not match isolated expected results")
+        result["parser"] = parser_summary(parsed)
+    if inspect_query_cmdline:
+        if result["query_in_cmdline"]:
+            errors.append("sentinel query appeared in sdcv cmdline")
+        if not (evidence_dir / str(result["cmdline_file"])).read_bytes():
+            errors.append("sdcv cmdline could not be captured")
+    result["errors"] = errors
+    result["status"] = "pass" if not errors else "fail"
+    return result, parsed
+
+
+def finalize_fuzzy_case(
+    result: dict[str, Any],
+    parsed: dict[str, Any] | None,
+    expected_headword: str,
+) -> dict[str, Any]:
+    if parsed is not None and not any(
+        item["word"] == expected_headword for item in parsed["options"]
+    ):
+        result["errors"].append("expected fuzzy candidate was absent")
+        result["status"] = "fail"
+    return result
+
+
+def finalize_empty_eof_case(
+    result: dict[str, Any], stdout: bytes
+) -> dict[str, Any]:
+    errors: list[str] = []
+    try:
+        parsed = production_parse_empty_eof(stdout)
+        result["parser"] = parser_summary(parsed)
+    except ProductionProtocolError as exc:
+        errors.append(str(exc))
+    if result["returncode"] != 0 or result["termination_reason"] is not None:
+        errors.append("top-level EOF did not exit cleanly")
+    if b"Invalid choice" in stdout:
+        errors.append("top-level EOF entered Invalid choice loop")
+    if not result["process_group_reaped"]:
+        errors.append("top-level EOF process group was not reaped")
+    result["errors"] = errors
+    result["status"] = "pass" if not errors else "fail"
+    return result
+
+
+def finalize_timeout_case(
+    result: dict[str, Any], timeout_seconds: float
+) -> dict[str, Any]:
+    errors: list[str] = []
+    if result["termination_reason"] != "timeout":
+        errors.append("timeout did not terminate at its configured bound")
+    if result["duration_ms"] > (timeout_seconds + 1.0) * 1000:
+        errors.append("timeout completion exceeded its upper bound")
+    if not result["process_group_reaped"]:
+        errors.append("timed-out process group was not reaped")
+    result["errors"] = errors
+    result["status"] = "pass" if not errors else "fail"
+    return result
+
+
+def finalize_cancellation_case(result: dict[str, Any]) -> dict[str, Any]:
+    errors: list[str] = []
+    if result["termination_reason"] != "cancelled":
+        errors.append("cancellation did not terminate the running process")
+    if result["duration_ms"] > 1050:
+        errors.append("cancellation completion exceeded its upper bound")
+    if not result["process_group_reaped"]:
+        errors.append("cancelled process group was not reaped")
+    if "query_sent" not in result.get("runner_decisions", []):
+        errors.append("cancellation occurred before the lookup query was sent")
+    result["errors"] = errors
+    result["status"] = "pass" if not errors else "fail"
+    return result
+
+
+def finalize_giant_under_case(
+    result: dict[str, Any], parsed: dict[str, Any] | None
+) -> dict[str, Any]:
+    if parsed is not None:
+        definitions = normalized_definitions(parsed)
+        result["errors"] = [
+            error
+            for error in result["errors"]
+            if error != "definitions did not match isolated expected results"
+        ]
+        if (
+            len(definitions) != 1
+            or len(definitions[0].encode("utf-8")) != GIANT_UNDER_BYTES
+        ):
+            result["errors"].append("32 MiB definition length was not preserved")
+        elif not definitions[0].endswith("GIANT-32-COMPLETE-TAIL"):
+            result["errors"].append("32 MiB definition tail was not preserved")
+        if result["stdout_bytes"] >= DEFAULT_CAP_BYTES:
+            result["errors"].append("32 MiB case did not remain below stdout cap")
+        result["status"] = "pass" if not result["errors"] else "fail"
+    return result
+
+
+def finalize_stdout_over_cap_case(result: dict[str, Any]) -> dict[str, Any]:
+    errors: list[str] = []
+    if result["termination_reason"] != "stdout_cap":
+        errors.append("over-cap output was not terminated at the stdout cap")
+    if result["stdout_stored_bytes"] != DEFAULT_CAP_BYTES:
+        errors.append("stored over-cap evidence did not stop at exactly the cap")
+    if not result["process_group_reaped"]:
+        errors.append("over-cap process group was not reaped")
+    result["errors"] = errors
+    result["status"] = "pass" if not errors else "fail"
+    return result
+
+
+def finalize_stderr_over_cap_case(result: dict[str, Any]) -> dict[str, Any]:
+    errors: list[str] = []
+    if result["termination_reason"] != "stderr_cap":
+        errors.append("over-cap stderr was not terminated at the stderr cap")
+    if result["stderr_stored_bytes"] != STDERR_CAP_BYTES:
+        errors.append("stored stderr evidence did not stop at exactly the cap")
+    if not (STDERR_CAP_BYTES < result["stderr_bytes"] <= STDERR_CAP_BYTES + 1):
+        errors.append("observed stderr bytes did not stop at cap plus sentinel")
+    if not result["process_group_reaped"]:
+        errors.append("stderr-capped process group was not reaped")
+    result["errors"] = errors
+    result["status"] = "pass" if not errors else "fail"
+    return result
+
+
+def finalize_sentinel_case(
+    result: dict[str, Any],
+    sentinel: str,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    result["sentinel_environment_match"] = any(
+        sentinel in value for value in environment.values()
+    )
+    if result["sentinel_environment_match"]:
+        result["errors"].append("sentinel query appeared in environment")
+        result["status"] = "fail"
+    return result
+
+
 def gate(args: argparse.Namespace) -> int:
     timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     evidence_dir = args.evidence_dir or (
@@ -696,55 +908,22 @@ def gate(args: argparse.Namespace) -> int:
         inspect_query_cmdline: bool = False,
         stdout_cap_bytes: int = DEFAULT_CAP_BYTES,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        result, stdout = production_run_bounded_protocol(
-            name=name,
-            argv=production_protocol_argv(
-                args.sdcv,
-                data_dir=str(data_root),
-                dictionaries=dictionaries,
-                exact=exact,
-            ),
+        result, parsed = run_completed_gate_case(
+            sdcv=args.sdcv,
+            data_root=data_root,
             environment=environment,
             evidence_dir=evidence_dir,
+            name=name,
             query=query,
+            dictionaries=dictionaries,
+            exact=exact,
+            expected_definitions=expected_definitions,
             choice=choice,
+            expected_headwords=expected_headwords,
             close_after_query=close_after_query,
-            timeout_seconds=8.0,
-            stdout_cap_bytes=stdout_cap_bytes,
             inspect_query_cmdline=inspect_query_cmdline,
+            stdout_cap_bytes=stdout_cap_bytes,
         )
-        errors: list[str] = []
-        parsed: dict[str, Any] | None = None
-        if result["termination_reason"] is not None:
-            errors.append(f"unexpected termination: {result['termination_reason']}")
-        if result["returncode"] != 0:
-            errors.append(f"unexpected return code: {result['returncode']}")
-        if result["stderr_bytes"] != 0:
-            errors.append(f"unexpected stderr bytes: {result['stderr_bytes']}")
-        if not result["process_group_reaped"]:
-            errors.append("process group was not fully reaped")
-        if query in result["argv_metadata"]:
-            errors.append("query appeared as an argv element")
-        try:
-            parsed = production_parse_protocol_stdout(stdout, query=query, choice=choice)
-        except ProductionProtocolError as exc:
-            errors.append(str(exc))
-        if parsed is not None:
-            actual_definitions = normalized_definitions(parsed)
-            if actual_definitions != expected_definitions:
-                errors.append("definitions did not match isolated expected results")
-            if expected_headwords is not None:
-                actual_headwords = [str(item.get("word", "")) for item in parsed["entries"]]
-                if actual_headwords != expected_headwords:
-                    errors.append("headwords did not match isolated expected results")
-            result["parser"] = parser_summary(parsed)
-        if inspect_query_cmdline:
-            if result["query_in_cmdline"]:
-                errors.append("sentinel query appeared in sdcv cmdline")
-            if not (evidence_dir / str(result["cmdline_file"])).read_bytes():
-                errors.append("sdcv cmdline could not be captured")
-        result["errors"] = errors
-        result["status"] = "pass" if not errors else "fail"
         cases.append(result)
         return result, parsed
 
@@ -778,12 +957,9 @@ def gate(args: argparse.Namespace) -> int:
             expected_definitions=expected["exact"]["word"],
             expected_headwords=[expected["fuzzy_expected_headword"]],
         )
-        if fuzzy_parsed is not None and not any(
-            item["word"] == expected["fuzzy_expected_headword"]
-            for item in fuzzy_parsed["options"]
-        ):
-            fuzzy_result["errors"].append("expected fuzzy candidate was absent")
-            fuzzy_result["status"] = "fail"
+        finalize_fuzzy_case(
+            fuzzy_result, fuzzy_parsed, expected["fuzzy_expected_headword"]
+        )
 
         record_completed(
             name="single_dictionary",
@@ -840,20 +1016,7 @@ def gate(args: argparse.Namespace) -> int:
             close_on_initial_prompt=True,
             timeout_seconds=2.0,
         )
-        empty_errors: list[str] = []
-        try:
-            empty_parsed = production_parse_empty_eof(empty_stdout)
-            empty_result["parser"] = parser_summary(empty_parsed)
-        except ProductionProtocolError as exc:
-            empty_errors.append(str(exc))
-        if empty_result["returncode"] != 0 or empty_result["termination_reason"] is not None:
-            empty_errors.append("top-level EOF did not exit cleanly")
-        if b"Invalid choice" in empty_stdout:
-            empty_errors.append("top-level EOF entered Invalid choice loop")
-        if not empty_result["process_group_reaped"]:
-            empty_errors.append("top-level EOF process group was not reaped")
-        empty_result["errors"] = empty_errors
-        empty_result["status"] = "pass" if not empty_errors else "fail"
+        finalize_empty_eof_case(empty_result, empty_stdout)
         cases.append(empty_result)
 
         for name, timeout_seconds in (("source_timeout", 0.10), ("overall_timeout", 0.25)):
@@ -870,15 +1033,7 @@ def gate(args: argparse.Namespace) -> int:
                 query=None,
                 timeout_seconds=timeout_seconds,
             )
-            errors = []
-            if timeout_result["termination_reason"] != "timeout":
-                errors.append("timeout did not terminate at its configured bound")
-            if timeout_result["duration_ms"] > (timeout_seconds + 1.0) * 1000:
-                errors.append("timeout completion exceeded its upper bound")
-            if not timeout_result["process_group_reaped"]:
-                errors.append("timed-out process group was not reaped")
-            timeout_result["errors"] = errors
-            timeout_result["status"] = "pass" if not errors else "fail"
+            finalize_timeout_case(timeout_result, timeout_seconds)
             cases.append(timeout_result)
 
         cancel_result, _stdout = production_run_bounded_protocol(
@@ -895,17 +1050,7 @@ def gate(args: argparse.Namespace) -> int:
             timeout_seconds=2.0,
             cancel_after_seconds=0.05,
         )
-        cancel_errors = []
-        if cancel_result["termination_reason"] != "cancelled":
-            cancel_errors.append("cancellation did not terminate the running process")
-        if cancel_result["duration_ms"] > 1050:
-            cancel_errors.append("cancellation completion exceeded its upper bound")
-        if not cancel_result["process_group_reaped"]:
-            cancel_errors.append("cancelled process group was not reaped")
-        if "query_sent" not in cancel_result.get("runner_decisions", []):
-            cancel_errors.append("cancellation occurred before the lookup query was sent")
-        cancel_result["errors"] = cancel_errors
-        cancel_result["status"] = "pass" if not cancel_errors else "fail"
+        finalize_cancellation_case(cancel_result)
         cases.append(cancel_result)
 
         giant_result, giant_parsed = record_completed(
@@ -916,20 +1061,7 @@ def gate(args: argparse.Namespace) -> int:
             expected_definitions=[],
             expected_headwords=["giant-under-cap"],
         )
-        if giant_parsed is not None:
-            definitions = [str(item.get("definition", "")).removeprefix("\n") for item in giant_parsed["entries"]]
-            giant_result["errors"] = [
-                error
-                for error in giant_result["errors"]
-                if error != "definitions did not match isolated expected results"
-            ]
-            if len(definitions) != 1 or len(definitions[0].encode("utf-8")) != GIANT_UNDER_BYTES:
-                giant_result["errors"].append("32 MiB definition length was not preserved")
-            elif not definitions[0].endswith("GIANT-32-COMPLETE-TAIL"):
-                giant_result["errors"].append("32 MiB definition tail was not preserved")
-            if giant_result["stdout_bytes"] >= DEFAULT_CAP_BYTES:
-                giant_result["errors"].append("32 MiB case did not remain below stdout cap")
-            giant_result["status"] = "pass" if not giant_result["errors"] else "fail"
+        finalize_giant_under_case(giant_result, giant_parsed)
 
         over_result, _stdout = production_run_bounded_protocol(
             name="stdout_over_cap",
@@ -945,15 +1077,7 @@ def gate(args: argparse.Namespace) -> int:
             timeout_seconds=8.0,
             stdout_cap_bytes=DEFAULT_CAP_BYTES,
         )
-        over_errors = []
-        if over_result["termination_reason"] != "stdout_cap":
-            over_errors.append("over-cap output was not terminated at the stdout cap")
-        if over_result["stdout_stored_bytes"] != DEFAULT_CAP_BYTES:
-            over_errors.append("stored over-cap evidence did not stop at exactly the cap")
-        if not over_result["process_group_reaped"]:
-            over_errors.append("over-cap process group was not reaped")
-        over_result["errors"] = over_errors
-        over_result["status"] = "pass" if not over_errors else "fail"
+        finalize_stdout_over_cap_case(over_result)
         cases.append(over_result)
 
         stderr_producer = temp / "sustained-stderr.py"
@@ -974,21 +1098,7 @@ def gate(args: argparse.Namespace) -> int:
             stdout_cap_bytes=DEFAULT_CAP_BYTES,
             stderr_cap_bytes=STDERR_CAP_BYTES,
         )
-        stderr_errors = []
-        if stderr_result["termination_reason"] != "stderr_cap":
-            stderr_errors.append("over-cap stderr was not terminated at the stderr cap")
-        if stderr_result["stderr_stored_bytes"] != STDERR_CAP_BYTES:
-            stderr_errors.append("stored stderr evidence did not stop at exactly the cap")
-        if not (
-            STDERR_CAP_BYTES
-            < stderr_result["stderr_bytes"]
-            <= STDERR_CAP_BYTES + 1
-        ):
-            stderr_errors.append("observed stderr bytes did not stop at cap plus sentinel")
-        if not stderr_result["process_group_reaped"]:
-            stderr_errors.append("stderr-capped process group was not reaped")
-        stderr_result["errors"] = stderr_errors
-        stderr_result["status"] = "pass" if not stderr_errors else "fail"
+        finalize_stderr_over_cap_case(stderr_result)
         cases.append(stderr_result)
 
         sentinel = "cmdline-" + secrets.token_hex(24)
@@ -1001,12 +1111,7 @@ def gate(args: argparse.Namespace) -> int:
             expected_headwords=[],
             inspect_query_cmdline=True,
         )
-        sentinel_result["sentinel_environment_match"] = any(
-            sentinel in value for value in environment.values()
-        )
-        if sentinel_result["sentinel_environment_match"]:
-            sentinel_result["errors"].append("sentinel query appeared in environment")
-            sentinel_result["status"] = "fail"
+        finalize_sentinel_case(sentinel_result, sentinel, environment)
 
         history_paths = [
             str(path.relative_to(temp))
@@ -1030,7 +1135,7 @@ def gate(args: argparse.Namespace) -> int:
         cases=cases,
     )
     report_path = evidence_dir / "report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report_path.write_text(serialize_report(report), encoding="utf-8")
     print(report_path)
     for case in cases:
         print(

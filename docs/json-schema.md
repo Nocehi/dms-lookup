@@ -59,8 +59,11 @@ dictionaries change between lookup and the explicit Open action.
 
 Every source should declare a boolean `exact_only`. When `true`, only an NFKC
 casefold-equal headword is accepted. When `false`, bounded non-exact candidates
-from the adapter are retained under `related_by_mode`. The adapter always
-supplies exact and bounded candidate results and does not choose this policy.
+from the adapter are retained under `related_by_mode`. The policy decides how
+much the adapter fetches: an exact-only source fetches only fuzzy candidates
+whose headword is NFKC-casefold equal to the query (sdcv's exact search is
+case-sensitive), and skips the fuzzy search entirely for a query with no such
+variants, such as CJK text.
 For old configs that omit `exact_only`, `allow_related` is read only as a legacy
 fallback; fresh configs explicitly set `exact_only`.
 
@@ -78,6 +81,8 @@ fallback; fresh configs explicitly set `exact_only`.
 | `candidate_modes` | string[] | Legal configured modes for the detected features, before result filtering. |
 | `installed_modes` | string[] | Modes with at least one detected local source. |
 | `unavailable_modes` | string[] | Configured modes with no detected local source. |
+| `incomplete_modes` | string[] | Candidate modes whose sources were cut short by the lookup budget or a source timeout; results for them may be missing. For a segmented lookup it also includes every mode cut short in any token. |
+| `incomplete_tokens` | string[] | `token_items[].key` of tokens with a non-empty `incomplete_modes`; empty unless `segmented`. The card names these tokens as timed out. |
 | `available_modes` | string[] | Candidate modes that returned an exact result. All are retained for manual switching. |
 | `default_mode` | string or null | Ranked preference among available modes; Kana and strong Cantonese markers are boosts, not exclusion rules. |
 | `results_by_mode` | object | Exact results keyed by mode id. |
@@ -141,7 +146,9 @@ Segmentation runs only when the whole query has no top-level exact mode. An
 optional external tokenizer is bounded by the remaining global lookup budget
 and at most two seconds. Without it, fresh installs use an explicitly
 non-linguistic script-run/bigram fallback reported as
-`fallback-script-ngram` with `fallback_segmentation_nonlinguistic`. At most 24
+`fallback-script-ngram` with `fallback_segmentation_nonlinguistic`. If an
+installed tokenizer predates the stdin CLI (it rejects `--stdin`), the same
+fallback is reported with `tokenizer_incompatible` instead. At most 24
 tokens are queried. `segmented` becomes true only when at least one token has a
 usable exact mode; empty token records remain unselectable in the UI.
 

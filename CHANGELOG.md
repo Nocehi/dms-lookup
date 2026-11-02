@@ -30,6 +30,47 @@
   user service, fresh-HOME release gates, backend strategy benchmark JSON, and
   isolated offscreen QML behavior/latency harnesses.
 
+### Post-rewrite regression fixes (fix/post-rewrite-regressions)
+
+Measured against v0.7.1 with the same user config and dictionaries; see the
+commit messages for evidence.
+
+- sdcv: abort homograph choice prompts (`為` in words.hk) instead of waiting
+  for the 1.5 s source timeout, then fetch every homograph entry.
+- Report modes and segmentation tokens cut short by the lookup budget:
+  `incomplete_modes` now also covers tokens, new `incomplete_tokens`, and the
+  card names timed-out tokens ("Timed out: 我們, 去") in the error colour.
+- Version-1 configs keep v0.7.1's Related row (`allow_related` shows fuzzy
+  entries only from a dictionary without the headword: Linux → Linum).
+- Tokenizer: name a pre-stdin (v0.7.1) tokenizer as `tokenizer_incompatible`;
+  the installer now stops before changing anything when the tokenizer is
+  missing or pre-stdin and asks for `--with-tokenizer`, `--tokenizer-bin PATH`
+  or `--without-tokenizer`; it never overwrites an unmanaged tokenizer.
+- Speed: exact-only sources no longer fetch fuzzy candidates they discard,
+  and every sdcv query of a lookup (exact, homograph choices, fuzzy list,
+  candidates, every segmentation token) runs through one stdin session per
+  source (`SdcvSession`; one `--exact-search` process serves exact and fuzzy
+  frames). Long sentences: ~1.3 s (v0.7.1) → ~0.35-0.40 s with every token
+  filled; single words at or below v0.7.1. Results are byte-identical.
+- HTML detection follows sdcv into data-dir subdirectories (any depth,
+  symlinks; loops visited once), so `sametypesequence=h` dictionaries kept in
+  subfolders (王力, CC-CEDICT, reader.dict) no longer show raw markup.
+- Design tokens: every colour, radius, spacing step, type size, font,
+  surface/outline opacity, elevation and window metric lives in
+  `qml/LookupTheme.qml`, shared by standalone and the DMS wrapper (DMS 2.0
+  popout baseline: radii 12/18/24, type 12/15/17/21/29, surface x0.9, 1 px
+  outline x0.35, level-2 shadow). CJK headwords use Jigmo (Asebi Mincho maps
+  rare URO code points to empty glyphs), other headings Asebi Mincho, UI
+  MiSans TC. The DMS wrapper maps raw `Theme.outline` (outlineMedium was
+  invisible at the default outline opacity). Matugen templates carry every
+  palette token plus `{{mode}}`; `docs/theming.md` documents the
+  `config.toml` section. A lint test rejects literals outside the token file.
+- Test harnesses: offscreen Quickshell launches detect `--allow-duplicate`
+  support (absent in quickshell 0.3.x) and drop desktop platform themes;
+  new offscreen card screenshot harness; fixtures may declare
+  config-conditioned expectations (`expect_by_config`, with a reason), used
+  for the 俳句 default mode and a v2 Linux Related-row fixture.
+
 Historical entries below record what was claimed or observed in the local
 development environment at that time. Counts such as `26/26` or `93%` are not
 current portable release guarantees; current suites require their exact config,

@@ -27,11 +27,12 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from dank_lookup_sdcv_stdin import (
     DEFAULT_STDOUT_CAP_BYTES,
+    MAIN_PROMPT,
     STDERR_CAP_BYTES,
     SdcvProtocolError,
-    parse_protocol_stdout,
+    SdcvSession,
+    parse_frame,
     protocol_argv,
-    run_bounded_protocol,
 )
 
 
@@ -39,6 +40,14 @@ SCHEMA_VERSION = 2
 MAX_QUERY_CHARS = 4096
 TOKENIZER_STDOUT_CAP_BYTES = 1024 * 1024
 TOKENIZER_STDERR_CAP_BYTES = 1024 * 1024
+MAX_HOMOGRAPH_CHOICES = 8
+# Internal marker set by the v1 config mapping; never read from user config.
+V1_FUZZY_FALLBACK_KEY = "_v1_fuzzy_fallback_only"
+# How many fuzzy candidates SdcvClient.query() fetches; see its docstring.
+CANDIDATES_ALL = "all"
+CANDIDATES_VARIANTS = "variants"
+CANDIDATES_FALLBACK = "fallback"
+INCOMPLETE_SOURCE_WARNINGS = frozenset({"lookup_budget_exhausted", "sdcv_source_timeout"})
 # Four UTF-8 bytes per Unicode scalar keeps every inline body within the CLI's
 # 8 MiB open-text stdin limit. Larger complete bodies must use open-ref.
 MAX_INLINE_FULL_CHARS = 2 * 1024 * 1024
@@ -151,6 +160,7 @@ _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _TRAILING_HORIZONTAL_SPACE = re.compile(r"[ \t]+(?=\n|$)")
 _IFO_MAX_BYTES = 1024 * 1024
 _IFO_MAX_FILES = 2048
+_IFO_MAX_DIRECTORIES = 4096
 
 
 def _normalise_definition_text(dictionary_name: str, text: str) -> str:
@@ -222,6 +232,32 @@ def _configured_data_directories(
     return directories
 
 
+def _ifo_files(directory: pathlib.Path) -> Iterable[pathlib.Path]:
+    """Yield ``*.ifo`` files under ``directory`` the way sdcv finds them.
+
+    sdcv loads dictionaries from every subdirectory of a data dir, at any
+    depth and through symlinked directories (verified on sdcv 0.5.5), so a
+    dictionary in ``dic/wangli/wangli.ifo`` is found. Unlike sdcv, a symlink
+    loop is visited once, and the walk is bounded.
+    """
+
+    visited: set[str] = set()
+    walked = 0
+    for current, subdirectories, filenames in os.walk(directory, followlinks=True):
+        real = os.path.realpath(current)
+        if real in visited:
+            subdirectories[:] = []
+            continue
+        visited.add(real)
+        walked += 1
+        if walked > _IFO_MAX_DIRECTORIES:
+            return
+        subdirectories.sort()
+        for filename in sorted(filenames):
+            if filename.endswith(".ifo"):
+                yield pathlib.Path(current) / filename
+
+
 def _read_ifo_metadata(path: pathlib.Path) -> dict[str, str] | None:
     try:
         if not path.is_file() or path.stat().st_size > _IFO_MAX_BYTES:
@@ -255,11 +291,11 @@ def resolve_definition_format(
     seen_paths: set[str] = set()
     for directory in _configured_data_directories(source, config):
         try:
-            candidates = sorted(directory.glob("*.ifo"), key=lambda item: item.name)
+            candidates = list(_ifo_files(directory))
         except OSError:
             continue
         for path in candidates:
-            identity = os.path.abspath(os.fspath(path))
+            identity = os.path.realpath(os.fspath(path))
             if identity in seen_paths:
                 continue
             seen_paths.add(identity)
@@ -320,6 +356,32 @@ def detect_features(text: str) -> dict[str, Any]:
     }
 
 
+def _apply_v1_related_policy(config: dict[str, Any]) -> bool:
+    """Map version-1 related semantics onto the version-2 source policy.
+
+    Up to v0.7.1 the main body was always exact-only and `allow_related`
+    alone decided whether fuzzy entries formed a Related row; `exact_only`
+    was not read. Version 2 makes `exact_only: true` drop related entries,
+    so a v1 source with `exact_only: true, allow_related: true` (the
+    shipped GCIDE/WordNet sources) silently lost its Related row.
+    """
+    if config.get("version", 1) != 1:
+        return False
+    changed = False
+    for mode in config.get("modes", {}).values():
+        if not isinstance(mode, dict):
+            continue
+        for source in mode.get("sources", []):
+            if isinstance(source, dict) and "allow_related" in source:
+                wanted = not bool(source["allow_related"])
+                if source.get("exact_only") != wanted:
+                    source["exact_only"] = wanted
+                    changed = True
+                if source["allow_related"]:
+                    source[V1_FUZZY_FALLBACK_KEY] = True
+    return changed
+
+
 def load_config(path: str | os.PathLike[str] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     configured = path or os.environ.get("DANK_LOOKUP_CONFIG")
     if configured is None:
@@ -335,6 +397,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> tuple[dict[str, A
         if not isinstance(value, dict) or not isinstance(value.get("modes"), dict):
             raise ValueError("config must contain an object named modes")
         metadata["loaded"] = True
+        if _apply_v1_related_policy(value):
+            metadata["legacy_related_policy"] = "v1_allow_related"
         return value, metadata
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         metadata["warning"] = "config_invalid_using_builtin"
@@ -381,6 +445,44 @@ def _parse_dictionary_list(output: str) -> set[str]:
     return names
 
 
+class _OneShotSession:
+    """Session adapter over a one-shot protocol runner.
+
+    Every ``ask`` runs its own process through ``run_bounded_protocol`` (or
+    an injected fake) and strips the surrounding prompts into a frame, so
+    callers written against :class:`SdcvSession` behave identically.
+    """
+
+    def __init__(self, protocol_runner: Callable[..., tuple[dict[str, Any], bytes]], **kwargs: Any) -> None:
+        self.protocol_runner = protocol_runner
+        self.kwargs = kwargs
+        self.frames = 0
+
+    def ask(
+        self,
+        query: str,
+        *,
+        choice: int | None = None,
+        timeout_seconds: float = 5.0,
+        stdout_cap_bytes: int = DEFAULT_STDOUT_CAP_BYTES,
+    ) -> tuple[dict[str, Any], bytes]:
+        run, stdout = self.protocol_runner(
+            query=query,
+            choice=choice,
+            timeout_seconds=timeout_seconds,
+            stdout_cap_bytes=stdout_cap_bytes,
+            **self.kwargs,
+        )
+        self.frames += 1
+        terminal = MAIN_PROMPT + b"\n"
+        if stdout.startswith(MAIN_PROMPT) and stdout.endswith(terminal) and len(stdout) >= len(MAIN_PROMPT) + len(terminal):
+            stdout = stdout[len(MAIN_PROMPT) : -len(terminal)]
+        return run, stdout
+
+    def close(self) -> dict[str, Any]:
+        return {"returncode": 0, "termination_reason": None, "process_group_reaped": True, "session_frames": self.frames}
+
+
 class SdcvClient:
     def __init__(
         self,
@@ -393,12 +495,37 @@ class SdcvClient:
         cancel_event: threading.Event | None = None,
         stdout_cap_bytes: int = DEFAULT_STDOUT_CAP_BYTES,
         stderr_cap_bytes: int = STDERR_CAP_BYTES,
+        session_factory: Callable[..., Any] | None = None,
+        fuzzy_in_exact_session: bool = True,
+        session_scope: str = "lookup",
     ) -> None:
         self.executable = executable or os.environ.get("DANK_LOOKUP_SDCV", "sdcv")
         self.timeout = timeout
         self.runner = runner or subprocess.run
         self.clock_ns = clock_ns or time.monotonic_ns
-        self.protocol_runner = protocol_runner or run_bounded_protocol
+        self.protocol_runner = protocol_runner
+        # One sdcv process per (dictionary, data_dir, exact flag) for the
+        # duration of query(); a legacy protocol_runner is wrapped so each
+        # frame still runs as its own one-shot process (tests, probes).
+        if session_factory is not None:
+            self.session_factory = session_factory
+        elif protocol_runner is not None:
+            self.session_factory = lambda **kwargs: _OneShotSession(protocol_runner, **kwargs)
+        else:
+            self.session_factory = SdcvSession
+        # sdcv routes a "/query" to its fuzzy search regardless of
+        # --exact-search (libwrapper.cpp process_phrase, case qtFUZZY), so one
+        # --exact-search session serves exact and fuzzy frames alike; proven
+        # on sdcv 0.5.5 by tests/probe_sdcv_session.py
+        # (session_fuzzy_under_exact_search). False keeps a separate
+        # non-exact session per source.
+        self.fuzzy_in_exact_session = bool(fuzzy_in_exact_session)
+        # "lookup": sessions stay open across query() calls (every token of a
+        # segmented lookup reuses them) until lookup() calls close();
+        # "query": each query() call closes its sessions on return.
+        self.session_scope = session_scope
+        self._sessions: dict[tuple[str, str | None, bool], Any] = {}
+        self.session_log: list[dict[str, Any]] = []
         self.cancel_event = cancel_event
         self.stdout_cap_bytes = max(1024, int(stdout_cap_bytes))
         self.stderr_cap_bytes = max(1024, int(stderr_cap_bytes))
@@ -506,21 +633,12 @@ class SdcvClient:
             return None, "lookup_budget_exhausted", 0
         started = self.clock_ns()
         try:
-            run, stdout = self.protocol_runner(
-                name="sdcv",
-                argv=protocol_argv(
-                    self.executable,
-                    data_dir=data_dir,
-                    dictionaries=[dictionary],
-                    exact=exact,
-                ),
-                environment=self.environment,
-                query=query,
+            session = self._session(dictionary=dictionary, data_dir=data_dir, exact=exact)
+            run, stdout = session.ask(
+                query,
                 choice=choice,
                 timeout_seconds=timeout,
-                cancellation_event=self.cancel_event,
                 stdout_cap_bytes=max(1, stdout_cap_bytes),
-                stderr_cap_bytes=self.stderr_cap_bytes,
             )
         except (OSError, RuntimeError, ValueError, UnicodeError):
             return None, "sdcv_execution_failed", 0
@@ -538,28 +656,161 @@ class SdcvClient:
                 self.budget_exhausted = True
                 return None, "lookup_budget_exhausted", int(run.get("stdout_bytes", 0))
             return None, "sdcv_source_timeout", int(run.get("stdout_bytes", 0))
-        if termination is not None or run.get("returncode") != 0:
+        # A live session has no return code yet (None); a finished process
+        # must have exited cleanly and its group must be gone.
+        if termination is not None or run.get("returncode") not in (None, 0):
             return None, "sdcv_execution_failed", int(run.get("stdout_bytes", 0))
-        if not run.get("process_group_reaped", False):
+        if run.get("process_group_reaped") is False:
             return None, "sdcv_reap_failed", int(run.get("stdout_bytes", 0))
         parser_choice = choice if int(run.get("choice_prompt_count", 0)) else None
+        if parser_choice is None and run.get("choice_aborted"):
+            parser_choice = -1
         try:
-            parsed = parse_protocol_stdout(stdout, query=query, choice=parser_choice)
+            parsed = parse_frame(stdout, query=query, choice=parser_choice)
         except SdcvProtocolError as exc:
             warning = "sdcv_invalid_json" if str(exc) == "invalid_result_json" else "sdcv_invalid_protocol"
             return None, warning, int(run.get("stdout_bytes", 0))
         return parsed, None, int(run.get("stdout_bytes", 0))
 
-    def query(self, source: Mapping[str, Any], query: str) -> tuple[list[dict[str, Any]], str | None]:
-        data_dir = os.path.expanduser(str(source["data_dir"])) if source.get("data_dir") else None
-        dictionary = str(source.get("name", ""))
-        remaining_cap = self.stdout_cap_bytes
-        exact_result, warning, used = self._stdin_query(
+    def _exact_query(
+        self,
+        *,
+        query: str,
+        dictionary: str,
+        data_dir: str | None,
+        stdout_cap_bytes: int,
+    ) -> tuple[dict[str, Any] | None, str | None, int]:
+        """Exact lookup that also returns every homograph entry.
+
+        sdcv lists homographs (e.g. words.hk 為 wai4/wai6) behind a choice
+        prompt; the aborted first run yields the option list, and each index
+        is then fetched with its own exact run.
+        """
+        result, warning, used = self._stdin_query(
             query=query,
             dictionary=dictionary,
             data_dir=data_dir,
             exact=True,
             choice=None,
+            stdout_cap_bytes=stdout_cap_bytes,
+        )
+        if result is None or result["entries"] or not result["options"]:
+            return result, warning, used
+        entries: list[dict[str, Any]] = []
+        for option in result["options"][:MAX_HOMOGRAPH_CHOICES]:
+            remaining_cap = stdout_cap_bytes - used
+            if remaining_cap <= 0 or self.budget_exhausted:
+                warning = warning or "sdcv_stdout_cap"
+                break
+            selected, selected_warning, selected_used = self._stdin_query(
+                query=query,
+                dictionary=dictionary,
+                data_dir=data_dir,
+                exact=True,
+                choice=int(option["index"]),
+                stdout_cap_bytes=remaining_cap,
+            )
+            used += selected_used
+            if selected_warning:
+                warning = warning or selected_warning
+                if selected_warning in {"lookup_budget_exhausted", "lookup_cancelled"}:
+                    break
+            if selected is not None:
+                entries.extend(selected["entries"])
+        return {"entries": entries, "options": [], "decisions": result["decisions"]}, warning, used
+
+    def query(
+        self,
+        source: Mapping[str, Any],
+        query: str,
+        *,
+        candidates: str = CANDIDATES_ALL,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Return exact entries plus bounded fuzzy candidates.
+
+        `candidates` limits how much of the fuzzy list is fetched:
+        CANDIDATES_ALL fetches every listed candidate; CANDIDATES_VARIANTS
+        fetches only candidates whose headword is NFKC-casefold equal to the
+        query (sdcv's exact search is case-sensitive) and skips the fuzzy
+        search when the query has no such variants; CANDIDATES_FALLBACK acts
+        like CANDIDATES_ALL when the exact search found nothing, else like
+        CANDIDATES_VARIANTS. A caller that would discard every non-exact
+        entry passes CANDIDATES_VARIANTS instead of paying one sdcv process
+        per discarded candidate.
+        """
+        if self.session_scope != "query":
+            return self._query(source, query, candidates=candidates)
+        close_warning: str | None = None
+        try:
+            entries, warning = self._query(source, query, candidates=candidates)
+        finally:
+            close_warning = self._close_sessions()
+        return entries, warning or close_warning
+
+    def close(self) -> str | None:
+        """End every open sdcv session; return a warning if one ended badly."""
+        return self._close_sessions()
+
+    def _session(self, *, dictionary: str, data_dir: str | None, exact: bool) -> Any:
+        if self.fuzzy_in_exact_session:
+            exact = True
+        key = (dictionary, data_dir, exact)
+        session = self._sessions.get(key)
+        if session is None:
+            session = self.session_factory(
+                name="sdcv",
+                argv=protocol_argv(
+                    self.executable,
+                    data_dir=data_dir,
+                    dictionaries=[dictionary],
+                    exact=exact,
+                ),
+                environment=self.environment,
+                cancellation_event=self.cancel_event,
+                stderr_cap_bytes=self.stderr_cap_bytes,
+            )
+            self._sessions[key] = session
+        return session
+
+    def _close_sessions(self) -> str | None:
+        """Close every open sdcv session; return a warning if one ended badly."""
+        warning: str | None = None
+        sessions, self._sessions = self._sessions, {}
+        for session in sessions.values():
+            started = self.clock_ns()
+            try:
+                closed = session.close()
+            except (OSError, RuntimeError, ValueError):
+                closed = {"termination_reason": "close_failed", "process_group_reaped": False}
+            finally:
+                self.backend_ns += max(0, self.clock_ns() - started)
+            self.session_log.append(closed)
+            if closed.get("process_group_reaped") is False:
+                warning = warning or "sdcv_reap_failed"
+            elif closed.get("returncode") not in (None, 0) or closed.get("termination_reason") not in (
+                None,
+                "cancelled",
+                "timeout",
+                "stdout_cap",
+                "stderr_cap",
+            ):
+                warning = warning or "sdcv_execution_failed"
+        return warning
+
+    def _query(
+        self,
+        source: Mapping[str, Any],
+        query: str,
+        *,
+        candidates: str,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        data_dir = os.path.expanduser(str(source["data_dir"])) if source.get("data_dir") else None
+        dictionary = str(source.get("name", ""))
+        remaining_cap = self.stdout_cap_bytes
+        exact_result, warning, used = self._exact_query(
+            query=query,
+            dictionary=dictionary,
+            data_dir=data_dir,
             stdout_cap_bytes=remaining_cap,
         )
         remaining_cap = max(0, remaining_cap - used)
@@ -573,12 +824,17 @@ class SdcvClient:
         entries = list(exact_result["entries"]) if exact_result is not None else []
         warnings = [warning] if warning else []
 
+        if candidates == CANDIDATES_FALLBACK:
+            candidates = CANDIDATES_VARIANTS if entries else CANDIDATES_ALL
+        variants_only = candidates == CANDIDATES_VARIANTS
+        have_identical = any(str(entry.get("word", "")) == query for entry in entries)
+
         # Exact search is case-sensitive in sdcv. The explicit fuzzy protocol
         # supplies a bounded candidate list; definitions are then fetched by
         # exact stdin lookups and policy remains in _lookup_modes().
-        # The adapter always supplies a bounded exact+candidate set. Whether a
-        # non-exact headword is accepted is exclusively a lookup policy choice.
-        if not self.budget_exhausted:
+        # Whether a non-exact headword is accepted is a lookup policy choice;
+        # `candidates` only avoids fetching entries that policy will discard.
+        if not self.budget_exhausted and not (variants_only and not _has_term_variants(query)):
             fuzzy_result, fuzzy_warning, used = self._stdin_query(
                 query="/" + query,
                 dictionary=dictionary,
@@ -599,12 +855,17 @@ class SdcvClient:
                     option_word = str(option.get("word", ""))
                     if option_dictionary != dictionary or not option_word:
                         continue
-                    candidate, candidate_warning, used = self._stdin_query(
+                    if variants_only and (
+                        (option_word == query and have_identical)
+                        or _normalised_term(option_word) != _normalised_term(query)
+                    ):
+                        # The exact search already returned the identical
+                        # headword; other non-variants would be discarded.
+                        continue
+                    candidate, candidate_warning, used = self._exact_query(
                         query=option_word,
                         dictionary=option_dictionary,
                         data_dir=data_dir,
-                        exact=True,
-                        choice=None,
                         stdout_cap_bytes=remaining_cap,
                     )
                     remaining_cap = max(0, remaining_cap - used)
@@ -634,6 +895,16 @@ class SdcvClient:
 
 def _normalised_term(value: str) -> str:
     return unicodedata.normalize("NFKC", str(value)).strip().casefold()
+
+
+def _has_term_variants(query: str) -> bool:
+    """Whether a headword other than `query` itself can be NFKC-casefold equal."""
+
+    value = str(query).strip()
+    return unicodedata.normalize("NFKC", value) != value or any(
+        character.casefold() != character or character.upper() != character
+        for character in value
+    )
 
 
 def is_exact(entry: Mapping[str, Any], query: str) -> bool:
@@ -889,20 +1160,34 @@ def _lookup_modes(
         for source in eligible_installed_sources:
             if getattr(client, "budget_exhausted", False):
                 warnings.add("lookup_budget_exhausted")
+                mode_status[mode_key]["incomplete"] = True
                 break
             name = str(source.get("name", ""))
             exact_only = source_exact_only(source)
             definition_format = resolve_definition_format(source, config)
-            entries, warning = client.query(source, query)
+            if source.get(V1_FUZZY_FALLBACK_KEY):
+                candidate_policy = CANDIDATES_FALLBACK
+            elif exact_only:
+                candidate_policy = CANDIDATES_VARIANTS
+            else:
+                candidate_policy = CANDIDATES_ALL
+            entries, warning = client.query(source, query, candidates=candidate_policy)
             if warning:
                 warnings.add(warning)
+                if warning in INCOMPLETE_SOURCE_WARNINGS:
+                    mode_status[mode_key]["incomplete"] = True
+            # v1 sources only showed sdcv's fuzzy matches when the headword
+            # itself had no entry in that dictionary.
+            fuzzy_fallback_only = bool(source.get(V1_FUZZY_FALLBACK_KEY)) and any(
+                is_exact(entry, query) for entry in entries
+            )
             for entry in entries:
                 item = dict(entry)
                 item.setdefault("dict", name)
                 item["_definition_format"] = definition_format
                 if is_exact(item, query):
                     exact_entries.append(item)
-                elif not exact_only:
+                elif not exact_only and not fuzzy_fallback_only:
                     related_entries.append(item)
 
         exact_rendered, exact_vault = render_entries(
@@ -934,6 +1219,9 @@ def _lookup_modes(
 
     installed_modes = [key for key, status in mode_status.items() if status["available"]]
     unavailable_modes = [key for key, status in mode_status.items() if not status["available"]]
+    # Modes whose sources were cut short (time budget or per-source timeout)
+    # must stay visible instead of silently disappearing from the result.
+    incomplete_modes = [key for key in candidates if mode_status.get(key, {}).get("incomplete")]
     available_modes = [key for key in candidates if key in results_by_mode]
     ranked_modes = sorted(
         available_modes,
@@ -944,6 +1232,7 @@ def _lookup_modes(
             "candidate_modes": candidates,
             "installed_modes": installed_modes,
             "unavailable_modes": unavailable_modes,
+            "incomplete_modes": incomplete_modes,
             "available_modes": available_modes,
             "default_mode": ranked_modes[0] if ranked_modes else None,
             "results_by_mode": results_by_mode,
@@ -1091,6 +1380,7 @@ def _segment(
     if cancel_event is not None and cancel_event.is_set():
         return [], None, "lookup_cancelled"
     process: subprocess.Popen[bytes] | None = None
+    stderr = b""
     try:
         process = subprocess.Popen(
             [str(path), "--lang", language, "--json", "--stdin"],
@@ -1104,7 +1394,7 @@ def _segment(
         process.stdin.close()
         process.stdin = None
         deadline = time.monotonic() + max(0.05, min(2.0, timeout_seconds))
-        stdout, _stderr, termination = _read_bounded_tokenizer_output(
+        stdout, stderr, termination = _read_bounded_tokenizer_output(
             process,
             deadline=deadline,
             cancel_event=cancel_event,
@@ -1133,6 +1423,11 @@ def _segment(
                     except OSError:
                         pass
     tokens = _fallback_segment(query)
+    if b"--stdin" in stderr:
+        # A pre-0.8 tokenizer (positional-text CLI) is installed. It cannot
+        # receive the query on stdin, so name the problem instead of hiding it
+        # behind the generic n-gram fallback warning.
+        return tokens, "fallback-script-ngram" if len(tokens) > 1 else None, "tokenizer_incompatible"
     return tokens, "fallback-script-ngram" if len(tokens) > 1 else None, (
         "fallback_segmentation_nonlinguistic" if len(tokens) > 1 else None
     )
@@ -1192,6 +1487,7 @@ def lookup(
         "token_items": [],
         "results_by_token": {},
         "segmentation": {"engine": None, "warning": None},
+        "incomplete_tokens": [],
         "error": None,
         "query_truncated": query_too_long,
         "config": config_meta,
@@ -1204,6 +1500,7 @@ def lookup(
             for key, mode in config.get("modes", {}).items()
             if isinstance(mode, Mapping) and mode.get("enabled", True)
         ],
+        "incomplete_modes": [],
         "available_modes": [],
         "default_mode": None,
         "results_by_mode": {},
@@ -1227,81 +1524,25 @@ def lookup(
         base.update(empty_modes)
         base["error"] = {"code": "sdcv_missing", "message": "Install sdcv to use local StarDict dictionaries"}
     else:
-        mode_data, vault = _lookup_modes(
-            query,
-            config,
-            client,
-            features,
-            retain_entry_vault=retain_entry_vault,
-            retain_full_blobs=retain_full_blobs,
-        )
-        base.update(mode_data)
-        if not mode_data["available_modes"]:
-            deadline_ns = getattr(client, "deadline_ns", None)
-            remaining_seconds = (
-                (deadline_ns - clock_ns()) / 1_000_000_000
-                if deadline_ns is not None
-                else 2.0
+        try:
+            base, vault = _lookup_with_backend(
+                base,
+                query,
+                config,
+                client,
+                features,
+                clock_ns=clock_ns,
+                retain_entry_vault=retain_entry_vault,
+                retain_full_blobs=retain_full_blobs,
             )
-            if getattr(client, "budget_exhausted", False) or remaining_seconds <= 0:
-                if hasattr(client, "budget_exhausted"):
-                    client.budget_exhausted = True
-                tokens, segmentation_engine, segmentation_warning = [], None, None
-            else:
-                tokens, segmentation_engine, segmentation_warning = _segment(
-                    query,
-                    features,
-                    config,
-                    timeout_seconds=remaining_seconds,
-                    cancel_event=getattr(client, "cancel_event", None),
-                )
-            if len(tokens) > 1:
-                results_by_token: dict[str, Any] = {}
-                token_items: list[dict[str, Any]] = []
-                aggregate_warnings = set(base.get("warnings", []))
-                for index, token in enumerate(tokens):
-                    token_features = detect_features(token)
-                    token_data, token_vault = _lookup_modes(
-                        token,
-                        config,
-                        client,
-                        token_features,
-                        retain_entry_vault=retain_entry_vault,
-                        retain_full_blobs=retain_full_blobs,
-                    )
-                    token_key = f"{index}:{token}"
-                    token_items.append({"key": token_key, "index": index, "token": token})
-                    results_by_token[token_key] = {
-                        "token": token,
-                        "index": index,
-                        **token_data,
-                    }
-                    vault["entries"].update(token_vault["entries"])
-                    vault["full_blobs"].update(token_vault["full_blobs"])
-                    aggregate_warnings.update(token_data.get("warnings", []))
-                base["warnings"] = sorted(aggregate_warnings)
-                if any(item["available_modes"] for item in results_by_token.values()):
-                    base["segmented"] = True
-                    base["tokens"] = tokens
-                    base["token_items"] = token_items
-                    base["results_by_token"] = results_by_token
-                    base["segmentation"] = {
-                        "engine": segmentation_engine,
-                        "warning": segmentation_warning,
-                    }
-
-        if not base.get("available_modes") and not base.get("segmented") and base.get("warnings"):
-            warnings = set(base["warnings"])
-            if "lookup_budget_exhausted" in warnings:
-                base["error"] = {
-                    "code": "lookup_timeout",
-                    "message": "Local dictionary lookup exceeded its configured time budget",
-                }
-            else:
-                base["error"] = {
-                    "code": "backend_error",
-                    "message": "One or more local dictionary sources could not be read",
-                }
+        finally:
+            # Session-scoped backends keep one sdcv process per source alive
+            # across every token of this lookup; end them here so no process
+            # outlives the request, and surface a bad exit as a warning.
+            close = getattr(client, "close", None)
+            close_warning = close() if callable(close) else None
+        if close_warning:
+            base["warnings"] = sorted(set(base.get("warnings", [])) | {close_warning})
 
     default_mode = base.get("default_mode")
     default_result = base.get("results_by_mode", {}).get(default_mode, {}) if default_mode else {}
@@ -1314,4 +1555,114 @@ def lookup(
         "backend_ms": round((client.backend_ns - backend_started_ns) / 1_000_000, 3),
         "total_ms": round((finished_ns - started_ns) / 1_000_000, 3),
     }
+    return base, vault
+
+
+def _lookup_with_backend(
+    base: dict[str, Any],
+    query: str,
+    config: Mapping[str, Any],
+    client: Any,
+    features: Mapping[str, Any],
+    *,
+    clock_ns: Callable[[], int],
+    retain_entry_vault: bool,
+    retain_full_blobs: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run the mode lookups (and segmentation fallback) against the backend."""
+    mode_data, vault = _lookup_modes(
+        query,
+        config,
+        client,
+        features,
+        retain_entry_vault=retain_entry_vault,
+        retain_full_blobs=retain_full_blobs,
+    )
+    base.update(mode_data)
+    if not mode_data["available_modes"]:
+        deadline_ns = getattr(client, "deadline_ns", None)
+        remaining_seconds = (
+            (deadline_ns - clock_ns()) / 1_000_000_000
+            if deadline_ns is not None
+            else 2.0
+        )
+        if getattr(client, "budget_exhausted", False) or remaining_seconds <= 0:
+            if hasattr(client, "budget_exhausted"):
+                client.budget_exhausted = True
+            tokens, segmentation_engine, segmentation_warning = [], None, None
+        else:
+            tokens, segmentation_engine, segmentation_warning = _segment(
+                query,
+                features,
+                config,
+                timeout_seconds=remaining_seconds,
+                cancel_event=getattr(client, "cancel_event", None),
+            )
+        if len(tokens) > 1:
+            results_by_token: dict[str, Any] = {}
+            token_items: list[dict[str, Any]] = []
+            aggregate_warnings = set(base.get("warnings", []))
+            for index, token in enumerate(tokens):
+                token_features = detect_features(token)
+                token_data, token_vault = _lookup_modes(
+                    token,
+                    config,
+                    client,
+                    token_features,
+                    retain_entry_vault=retain_entry_vault,
+                    retain_full_blobs=retain_full_blobs,
+                )
+                token_key = f"{index}:{token}"
+                token_items.append({"key": token_key, "index": index, "token": token})
+                results_by_token[token_key] = {
+                    "token": token,
+                    "index": index,
+                    **token_data,
+                }
+                vault["entries"].update(token_vault["entries"])
+                vault["full_blobs"].update(token_vault["full_blobs"])
+                aggregate_warnings.update(token_data.get("warnings", []))
+            base["warnings"] = sorted(aggregate_warnings)
+            # A token cut short by the budget must stay visible: fold its
+            # modes into the top-level list the card reads.
+            incomplete_tokens = [
+                item["key"]
+                for item in token_items
+                if results_by_token[item["key"]].get("incomplete_modes")
+            ]
+            if incomplete_tokens:
+                token_modes = {
+                    mode
+                    for key in incomplete_tokens
+                    for mode in results_by_token[key]["incomplete_modes"]
+                }
+                ordered_modes = [str(key) for key in config.get("modes", {})]
+                base["incomplete_modes"] = [
+                    mode
+                    for mode in ordered_modes
+                    if mode in token_modes or mode in base.get("incomplete_modes", [])
+                ]
+            if any(item["available_modes"] for item in results_by_token.values()):
+                base["segmented"] = True
+                base["incomplete_tokens"] = incomplete_tokens
+                base["tokens"] = tokens
+                base["token_items"] = token_items
+                base["results_by_token"] = results_by_token
+                base["segmentation"] = {
+                    "engine": segmentation_engine,
+                    "warning": segmentation_warning,
+                }
+
+    if not base.get("available_modes") and not base.get("segmented") and base.get("warnings"):
+        warnings = set(base["warnings"])
+        if "lookup_budget_exhausted" in warnings:
+            base["error"] = {
+                "code": "lookup_timeout",
+                "message": "Local dictionary lookup exceeded its configured time budget",
+            }
+        else:
+            base["error"] = {
+                "code": "backend_error",
+                "message": "One or more local dictionary sources could not be read",
+            }
     return base, vault

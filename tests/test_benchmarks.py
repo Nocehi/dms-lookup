@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import benchmark_lookup  # noqa: E402
 import benchmark_ui  # noqa: E402
+import quickshell_offscreen  # noqa: E402
 import recalculate_benchmark_percentiles  # noqa: E402
 from verify_wayland_presentation import (  # noqa: E402
     WaylandVerificationError,
@@ -74,6 +75,48 @@ class BenchmarkRetentionTests(unittest.TestCase):
             recalculated = recalculate_benchmark_percentiles.recalculate(path)
         self.assertTrue(recalculated["all_match"])
         self.assertEqual(recalculated["phases"][0]["sample_count"], 2)
+
+
+class QuickshellOffscreenLaunchTests(unittest.TestCase):
+    def _fake_quickshell(self, directory: pathlib.Path, name: str, help_text: str) -> str:
+        path = directory / name
+        path.write_text(f"#!/bin/sh\nprintf '%s\\n' '{help_text}'\n", encoding="utf-8")
+        path.chmod(0o755)
+        return str(path)
+
+    def test_allow_duplicate_is_passed_only_when_the_binary_lists_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            upstream = self._fake_quickshell(root, "upstream", "-n, --no-duplicate  Exit immediately")
+            fork = self._fake_quickshell(root, "fork", "--allow-duplicate  Allow a second instance")
+            self.assertEqual(
+                quickshell_offscreen.launch_arguments(upstream, "-p", "/cfg"),
+                [upstream, "-p", "/cfg", "--no-color"],
+            )
+            self.assertEqual(
+                quickshell_offscreen.launch_arguments(fork, "-c", "dank-lookup"),
+                [fork, "-c", "dank-lookup", "--allow-duplicate", "--no-color"],
+            )
+            missing = str(root / "missing")
+            self.assertFalse(quickshell_offscreen.supports_allow_duplicate(missing))
+
+    def test_offscreen_environment_drops_desktop_theme_only_in_the_copy(self):
+        base = {
+            "QT_QPA_PLATFORM": "wayland;xcb",
+            "QT_QPA_PLATFORMTHEME": "gtk3",
+            "QT_QPA_PLATFORMTHEME_QT6": "gtk3",
+            "QT_STYLE_OVERRIDE": "kvantum",
+            "WAYLAND_DISPLAY": "wayland-1",
+            "DISPLAY": ":0",
+            "LANG": "zh_HK.UTF-8",
+        }
+        snapshot = dict(base)
+        environment = quickshell_offscreen.offscreen_environment(base, HOME="/tmp/h")
+        self.assertEqual(base, snapshot)
+        self.assertEqual(
+            environment,
+            {"QT_QPA_PLATFORM": "offscreen", "LANG": "zh_HK.UTF-8", "HOME": "/tmp/h"},
+        )
 
 
 class WaylandPresentationTests(unittest.TestCase):

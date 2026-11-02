@@ -20,6 +20,8 @@ import tempfile
 import time
 from typing import Any, Callable
 
+from quickshell_offscreen import launch_arguments, offscreen_environment
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 QML_ROOT = ROOT / "qml"
@@ -181,13 +183,7 @@ class Frontend:
     def start(self) -> None:
         self.log_handle = self.log_path.open("wb")
         self.process = subprocess.Popen(
-            [
-                self.quickshell,
-                "-p",
-                str(self.config),
-                "--allow-duplicate",
-                "--no-color",
-            ],
+            launch_arguments(self.quickshell, "-p", str(self.config)),
             stdin=subprocess.DEVNULL,
             stdout=self.log_handle,
             stderr=subprocess.STDOUT,
@@ -357,6 +353,8 @@ def segmented_miss_response(
         "default_mode": None,
         "available_modes": [],
         "segmented": True,
+        "incomplete_modes": ["han"],
+        "incomplete_tokens": ["0:空"],
         "token_items": [
             {"key": "0:空", "index": 0, "token": "空"},
             {"key": "1:首", "index": 1, "token": "首"},
@@ -491,9 +489,7 @@ def run_smoke(timeout: float) -> None:
         invalid_theme = temp / "invalid-theme.json"
         invalid_theme.write_text('{"primary":"not-a-colour"}\n', encoding="utf-8")
 
-        env = os.environ.copy()
-        env.pop("DISPLAY", None)
-        env.pop("WAYLAND_DISPLAY", None)
+        env = offscreen_environment(os.environ)
         env.update(
             {
                 "HOME": str(home),
@@ -501,7 +497,6 @@ def run_smoke(timeout: float) -> None:
                 "XDG_DATA_HOME": str(home / ".local/share"),
                 "XDG_CACHE_HOME": str(home / ".cache"),
                 "XDG_RUNTIME_DIR": str(runtime),
-                "QT_QPA_PLATFORM": "offscreen",
                 "DANK_LOOKUP_ENABLE_MOCK_IPC": "1",
                 "DANK_LOOKUP_BENCHMARK": "1",
                 "DANK_LOOKUP_THEME_VARIANT": "dark",
@@ -532,6 +527,8 @@ def run_smoke(timeout: float) -> None:
                 "surface_container_high": "#2b292f",
                 "on_surface": "#e8e0e9",
                 "outline": "#958e99",
+                "error": "#ffb4ab",
+                "on_error": "#690005",
                 "dark": True,
             }, f"invalid matugen palette did not retain dark fallback: {theme}")
 
@@ -740,6 +737,8 @@ def run_smoke(timeout: float) -> None:
             require(automatic.get("token_key") == "1:首"
                     and automatic.get("body") == "first-usable-preview",
                     f"first usable token was not selected: {automatic}")
+            require(automatic.get("incomplete_label") == "Timed out: 空",
+                    f"token cut short by the budget was not named: {automatic}")
             require(frontend.action("copy-payload") == "first-usable-preview",
                     "automatic token Copy payload used the Whole result")
             open_capture.unlink(missing_ok=True)

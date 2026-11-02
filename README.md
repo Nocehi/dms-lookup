@@ -48,7 +48,7 @@ completion is ignored.
 ## Install
 
 ```bash
-bash packaging/install-user.sh
+bash packaging/install-user.sh --with-tokenizer   # or --tokenizer-bin PATH / --without-tokenizer
 dank-lookup-language-packs status
 ```
 
@@ -116,8 +116,15 @@ or sharing any data. In particular, this project does not bundle words.hk,
 XDICT, reader.dict, or any dictionary whose exact artifact/license chain has
 not been admitted.
 
-The optional Rust tokenizer remains supported when separately installed. A
-fresh install also has a dependency-free, explicitly non-linguistic script/
+The Rust tokenizer is built and installed as a managed file with
+`bash packaging/install-user.sh --with-tokenizer` (needs `cargo`; the
+lindera-ipadic build script downloads IPADIC, so the build needs network
+access), or from an existing build with `--tokenizer-bin PATH`. It reads the
+query on stdin. When no tokenizer is installed, or the installed one is the
+v0.7.1 positional-text build, the installer stops before changing anything and
+names these options; it never overwrites an unmanaged tokenizer, so move an
+old one aside first. `--without-tokenizer` installs on purpose without one:
+segmentation then uses a dependency-free, explicitly non-linguistic script/
 bigram fallback, capped at 24 tokens and identified in the result metadata; it
 does not pretend to be complete Chinese or Japanese language identification.
 
@@ -125,6 +132,11 @@ does not pretend to be complete Chinese or Japanese language identification.
 
 - fixed/min/max popup with scrollable plain-text definitions;
 - explicit source names and mode labels;
+- CJK headwords use the `Jigmo` Mincho font when installed (`ttf-jigmo`,
+  CC0), otherwise `Asebi Mincho`, which also sets other heading text; set
+  `DANK_LOOKUP_HEADWORD_FONT` to override the CJK headword font. Rare Ext B+
+  characters need fontconfig fallback to `Jigmo2`/`Jigmo3`; `font.families`
+  lists are not available in QML. UI text uses MiSans TC;
 - exact/related switch using the active displayed body;
 - token row consumes ordered `token_items` and supports duplicate token text;
 - query/mode/related/token changes reset scroll predictably;
@@ -142,22 +154,55 @@ JSON. Re-fetch can fail if dictionaries or routing change before Open full.
 
 ## Theme contract
 
-Standalone uses six colors plus a dark flag:
+Every colour, radius, spacing step, type size, font and elevation value is a
+token in `qml/LookupTheme.qml`, shared by standalone and the DMS wrapper; a lint
+test rejects literals elsewhere. The palette uses matugen role names:
 
 ```text
 primary, on_primary, surface, surface_container_high,
-on_surface, outline, dark
+on_surface, outline, error, on_error (+ mode/dark)
 ```
 
 Built-in light/dark palettes work without generated files. The installer ships
-generic matugen 4.x JSON templates; `DANK_LOOKUP_THEME_FILE` enables safe
-last-known-good reload. DMS tokens are mapped only inside the optional wrapper.
+complete matugen 4.x JSON templates; `DANK_LOOKUP_THEME_FILE` enables safe
+last-known-good reload. DMS Theme values are mapped onto token names only
+inside the optional wrapper. See [`docs/theming.md`](docs/theming.md) for the
+token layout, the DMS 2.0 baseline and the `~/.config/matugen/config.toml`
+section to add.
 
 ## Tests and benchmarks
 
+Dank Lookup supports Python 3.11 and newer. On a fresh checkout, create an
+isolated Python environment and install the exact release/test dependency set
+before running the minimum suite. The same `jsonschema` installation is used
+by the production review-bundle consumer; missing, version-skewed, or active
+marker-selected dependencies are rejected by the pre-release preflight.
+
 ```bash
-python3 -m unittest -v tests.test_core tests.test_runtime tests.test_cli
+python3 -m venv /tmp/dank-lookup-venv
+. /tmp/dank-lookup-venv/bin/activate
+python3 -m pip install --requirement requirements-dev.txt
+```
+
+The pre-release shell gate additionally requires Bash, ripgrep, ShellCheck,
+GNU coreutils/findutils, and grep on `PATH`. Rust tokenizer tests require a
+Rust toolchain; QML smoke requires the locally supported Quickshell/QML tools.
+
+```bash
+python3 -m unittest -v \
+  tests.test_benchmarks \
+  tests.test_cancellation_full_stack \
+  tests.test_cli \
+  tests.test_core \
+  tests.test_dependency_preflight \
+  tests.test_design_tokens \
+  tests.test_fixture_runner \
+  tests.test_packaging \
+  tests.test_runtime \
+  tests.test_selection_latency \
+  tests.test_transport
 bash packaging/pre-release-check.sh
+cargo test --manifest-path tokenizer/Cargo.toml --locked
 python3 tests/run_qml_smoke.py
 qmllint /path/to/staged/quickshell/dank-lookup/shell.qml
 python3 tests/benchmark_lookup.py \

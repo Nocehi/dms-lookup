@@ -70,6 +70,11 @@ check_shellcheck() {
     shellcheck "${files[@]}"
 }
 
+check_python_test_dependencies() {
+    python3 packaging/check-python-dependencies.py \
+        requirements-dev.txt tests/fixtures-sdcv-stdin/evidence-schema.json
+}
+
 check_python_syntax() {
     local files=()
     local file
@@ -150,15 +155,21 @@ if plugin["type"] == "launcher":
 for mapping in (
     "primary: Theme.primary",
     "on_primary: Theme.onPrimary",
-    "surface: Theme.surface",
+    "surface: Theme.hostSurface",
     "surface_container_high: Theme.surfaceContainerHigh",
     "on_surface: Theme.surfaceText",
-    "outline: Theme.outlineMedium",
+    "outline: Theme.outline\n",
+    "error: Theme.error",
+    "on_error: Theme.onError",
     "dark: !Theme.isLightMode",
+    "cornerRadius: Theme.cornerRadius",
+    "surfaceOpacity: Theme.popupTransparency",
     "Shared.LookupApplication",
-    "themeOverride: dmsTheme",
+    "themeHost: dmsTheme",
 ):
     assert mapping in dms_wrapper, mapping
+# outlineMedium is scaled by blurLayerOutlineOpacity (0 by default): invisible.
+assert ": Theme.outlineMedium" not in dms_wrapper
 PY
 }
 
@@ -198,11 +209,13 @@ check_install_parity() {
     local fake_home="$TEMP_ROOT/home"
     local fake_config="$TEMP_ROOT/config"
     local fake_data="$TEMP_ROOT/data"
-    mkdir -p "$fake_home" "$fake_config" "$fake_data"
+    local fake_runtime="$TEMP_ROOT/runtime"
+    mkdir -p "$fake_home" "$fake_config" "$fake_data" "$fake_runtime" || return 1
+    chmod 700 "$fake_runtime" || return 1
 
     HOME="$fake_home" XDG_CONFIG_HOME="$fake_config" XDG_DATA_HOME="$fake_data" \
-        packaging/install-user.sh >"$TEMP_ROOT/install-fresh.log"
-    python3 - "$fake_config/dank-lookup/config.json" <<'PY'
+        packaging/install-user.sh --without-tokenizer >"$TEMP_ROOT/install-fresh.log" || return 1
+    python3 - "$fake_config/dank-lookup/config.json" <<'PY' || return 1
 import json
 import pathlib
 import sys
@@ -212,15 +225,18 @@ assert list(config["modes"]) == ["han", "en", "ja", "yue"]
 PY
     [[ "$(stat -c '%a' "$fake_config/dank-lookup/config.json")" == 600 ]] || return 1
 
-    install -Dm600 tests/configs/ci-minimal.json "$fake_config/dank-lookup/config.json"
+    install -Dm600 tests/configs/ci-minimal.json \
+        "$fake_config/dank-lookup/config.json" || return 1
     local before
-    before="$(sha256sum "$fake_config/dank-lookup/config.json" | cut -d' ' -f1)"
+    before="$(sha256sum "$fake_config/dank-lookup/config.json" | cut -d' ' -f1)" \
+        || return 1
 
     HOME="$fake_home" XDG_CONFIG_HOME="$fake_config" XDG_DATA_HOME="$fake_data" \
-        packaging/install-user.sh >"$TEMP_ROOT/install-repeat.log"
+        packaging/install-user.sh --without-tokenizer >"$TEMP_ROOT/install-repeat.log" || return 1
 
     local after
-    after="$(sha256sum "$fake_config/dank-lookup/config.json" | cut -d' ' -f1)"
+    after="$(sha256sum "$fake_config/dank-lookup/config.json" | cut -d' ' -f1)" \
+        || return 1
     [[ "$before" == "$after" ]] || return 1
 
     local required=(
@@ -246,10 +262,13 @@ PY
 
     printf '%s' 'fresh install' \
     | HOME="$fake_home" XDG_CONFIG_HOME="$fake_config" XDG_DATA_HOME="$fake_data" \
+        XDG_RUNTIME_DIR="$fake_runtime" \
+        DANK_LOOKUP_BACKEND_IDLE_TIMEOUT=0.1 \
         DANK_LOOKUP_SDCV="$TEMP_ROOT/no-such-sdcv" \
         "$fake_home/.local/bin/dank-lookup" lookup \
-        >"$TEMP_ROOT/installed-cli.json"
-    python3 - "$TEMP_ROOT/installed-cli.json" "$fake_config/dank-lookup/config.json" <<'PY'
+        >"$TEMP_ROOT/installed-cli.json" || return 1
+    python3 - "$TEMP_ROOT/installed-cli.json" \
+        "$fake_config/dank-lookup/config.json" <<'PY' || return 1
 import json
 import pathlib
 import sys
@@ -265,8 +284,8 @@ PY
     printf '%s' 'stdin-safe query' \
     | "$fake_home/.local/lib/dank-lookup/backends/mock.sh" \
         --stdout --stdin --request-id installed-mock --sequence 17 \
-        >"$TEMP_ROOT/installed-mock.json"
-    python3 - "$TEMP_ROOT/installed-mock.json" <<'PY'
+        >"$TEMP_ROOT/installed-mock.json" || return 1
+    python3 - "$TEMP_ROOT/installed-mock.json" <<'PY' || return 1
 import json
 import pathlib
 import sys
@@ -280,47 +299,64 @@ assert result["runtime"]["retained"] is False
 PY
 
     HOME="$fake_home" XDG_CONFIG_HOME="$fake_config" XDG_DATA_HOME="$fake_data" \
-        packaging/install-user.sh --with-dms >"$TEMP_ROOT/install-dms.log"
-    [[ -f "$fake_config/DankMaterialShell/plugins/dankLookup/plugin.json" ]]
-    [[ -f "$fake_config/DankMaterialShell/plugins/dankLookup/shared/LookupApplication.qml" ]]
+        packaging/install-user.sh --with-dms --without-tokenizer \
+        >"$TEMP_ROOT/install-dms.log" || return 1
+    [[ -f "$fake_config/DankMaterialShell/plugins/dankLookup/plugin.json" ]] \
+        || return 1
+    [[ -f "$fake_config/DankMaterialShell/plugins/dankLookup/shared/LookupApplication.qml" ]] \
+        || return 1
 }
 
-echo '== Dank Lookup pre-release check =='
+main() {
+    echo '== Dank Lookup pre-release check =='
 
-echo '--- source safety ---'
-run_check absolute_paths check_no_absolute_paths
-run_check dictionary_payload check_no_dictionary_data
-run_check runtime_output check_no_runtime_output
+    echo '--- source safety ---'
+    run_check absolute_paths check_no_absolute_paths
+    run_check dictionary_payload check_no_dictionary_data
+    run_check runtime_output check_no_runtime_output
 
-echo '--- syntax and standalone boundary ---'
-run_check shell_syntax check_shell_syntax
-if check_shellcheck; then
-    pass shellcheck
-elif [[ $? -eq 77 ]]; then
-    printf '  FAIL  shellcheck (not installed)\n'
-    failures=$((failures + 1))
-else
-    fail shellcheck
-fi
-run_check python_syntax check_python_syntax
-run_check standalone_no_dms check_standalone_independence
-run_check resident_no_clipboard_read check_resident_clipboard_boundary
+    echo '--- syntax and standalone boundary ---'
+    run_check shell_syntax check_shell_syntax
+    if check_shellcheck; then
+        pass shellcheck
+    elif [[ $? -eq 77 ]]; then
+        printf '  FAIL  shellcheck (not installed)\n'
+        failures=$((failures + 1))
+    else
+        fail shellcheck
+    fi
+    run_check python_test_dependencies check_python_test_dependencies
+    run_check dependency_preflight_tests \
+        python3 -m unittest -v tests.test_dependency_preflight
+    run_check python_syntax check_python_syntax
+    run_check standalone_no_dms check_standalone_independence
+    run_check resident_no_clipboard_read check_resident_clipboard_boundary
 
-echo '--- manifests and delivery ---'
-run_check manifest_schema check_manifests_and_config
-run_check language_pack_status check_language_pack_status
-run_check install_parity check_install_parity
-run_check managed_install_matrix python3 tests/test_packaging.py
-run_check required_files test -f LICENSE -a -f CHANGELOG.md -a -f README.md \
-    -a -f packaging/managed-files.py -a -f packaging/legacy-managed-files.json \
-    -a -f packaging/build-review-bundle.sh \
-    -a -f packaging/release_evidence.py \
-    -a -f packaging/review-evidence-requirements.json
+    echo '--- manifests and delivery ---'
+    run_check manifest_schema check_manifests_and_config
+    run_check language_pack_status check_language_pack_status
+    run_check install_parity_fail_fast bash tests/test_pre_release_fail_fast.sh
+    run_check install_parity check_install_parity
+    run_check managed_install_matrix python3 tests/test_packaging.py
+    run_check required_files test -f LICENSE -a -f CHANGELOG.md -a -f README.md \
+        -a -f packaging/managed-files.py -a -f packaging/legacy-managed-files.json \
+        -a -f packaging/build-review-bundle.sh \
+        -a -f packaging/release_evidence.py \
+        -a -f packaging/review-evidence-requirements.json \
+        -a -f packaging/check-python-dependencies.py \
+        -a -f requirements-dev.txt \
+        -a -f tests/test_dependency_preflight.py \
+        -a -f tests/test_pre_release_fail_fast.sh
 
-echo
-if ((failures == 0)); then
-    echo 'All checks passed.'
-else
-    printf '%d check(s) failed.\n' "$failures"
-    exit 1
+    echo
+    if ((failures == 0)); then
+        echo 'All checks passed.'
+    else
+        printf '%d check(s) failed.\n' "$failures"
+        return 1
+    fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi

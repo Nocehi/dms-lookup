@@ -2,9 +2,11 @@
 
 用途：保留 Dank Lookup 詞典卡片的 Material Design 3 設計依據。現行產品是 standalone-first；共享 `qml/` 不依賴 DMS，內建 light/dark palette 並可讀 generic matugen JSON。文中舊有 DMS token／prototype 描述只可視為視覺參考；DMS `Theme.*` 現在只由 optional compatibility wrapper 映射到最小 theme contract。
 
-現行 theme contract 是 `primary`、`on_primary`、`surface`、
-`surface_container_high`、`on_surface`、`outline`、`dark`。實作與生命週期
-真相以 `qml/LookupCard.qml`、`qml/LookupController.qml` 及
+現行設計值（色彩、圓角、間距、字級、字型、透明度、陰影）全部集中在
+`qml/LookupTheme.qml`，說明見 `docs/theming.md`；本手冊中的 `Theme.outlineMedium`、
+Noto Serif 標題等片段已過時（outlineMedium 在 DMS 預設 outline 透明度 0 下不可見；
+標題現為 Asebi Mincho，CJK 頭字為 Jigmo）。實作與生命週期真相以
+`qml/LookupTheme.qml`、`qml/LookupCard.qml`、`qml/LookupController.qml` 及
 `docs/json-schema.md` 為準，不以此手冊的歷史 prototype 片段為準。
 
 ## Sources checked

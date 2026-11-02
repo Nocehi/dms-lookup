@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -30,12 +31,15 @@ from dank_lookup_core import (  # noqa: E402
     lookup,
     render_entries,
     resolve_definition_format,
+    load_config,
     source_exact_only,
 )
 from dank_lookup_sdcv_stdin import (  # noqa: E402
     STDERR_CAP_BYTES,
     SdcvProtocolError,
+    SdcvSession,
     parse_empty_eof,
+    parse_frame,
     parse_protocol_stdout,
     protocol_argv,
     run_bounded_protocol,
@@ -56,12 +60,14 @@ class FakeClient:
         self.responses = responses or {}
         self.backend_ns = 1_000_000
         self.calls = []
+        self.candidate_policies = []
 
     def source_installed(self, source):
         return source["name"] in self.installed
 
-    def query(self, source, query):
+    def query(self, source, query, *, candidates="all"):
         self.calls.append((source["name"], query))
+        self.candidate_policies.append((source["name"], candidates))
         return list(self.responses.get((source["name"], query), [])), None
 
 
@@ -72,7 +78,7 @@ class MissingClient(FakeClient):
 class TokenBudgetClient(FakeClient):
     budget_exhausted = False
 
-    def query(self, source, query):
+    def query(self, source, query, *, candidates="all"):
         self.calls.append((source["name"], query))
         if len(query) < 3:
             self.budget_exhausted = True
@@ -289,6 +295,27 @@ class DetectionRoutingTests(unittest.TestCase):
         item = next(item for item in result["token_items"] if item["token"] == "甚麼")
         self.assertIn(item["key"], result["results_by_token"])
 
+    def test_pre_stdin_tokenizer_is_reported_as_incompatible(self):
+        # The v0.7.1 tokenizer only took positional text; it answers the
+        # stdin CLI with a usage error and no tokens.
+        with tempfile.TemporaryDirectory() as directory:
+            tokenizer = write_shell(
+                pathlib.Path(directory) / "old-tokenize",
+                """
+                printf 'unknown option: --stdin\\n' >&2
+                exit 0
+                """,
+            )
+            client = FakeClient(
+                installed={"HanDict"},
+                responses={("HanDict", "甚麼"): [{"dict": "HanDict", "word": "甚麼", "definition": "what"}]},
+            )
+            with mock.patch.dict(os.environ, {"DANK_LOOKUP_TOKENIZER": str(tokenizer)}, clear=False):
+                result, _ = self._lookup_with(config_for_tests(), client, "為甚麼會這樣")
+        self.assertTrue(result["segmented"])
+        self.assertEqual(result["segmentation"]["engine"], "fallback-script-ngram")
+        self.assertEqual(result["segmentation"]["warning"], "tokenizer_incompatible")
+
     def test_fallback_segmentation_preserves_duplicate_tokens_with_indexed_keys_and_caps_count(self):
         query = "人" * 100
         client = FakeClient(
@@ -317,6 +344,38 @@ class DetectionRoutingTests(unittest.TestCase):
         self.assertFalse(result["segmented"])
         self.assertIn("lookup_budget_exhausted", result["warnings"])
         self.assertEqual(result["error"]["code"], "lookup_timeout")
+
+    def test_token_cut_short_by_budget_is_reported_at_top_level(self):
+        class LateBudgetClient(FakeClient):
+            budget_exhausted = False
+
+            def query(self, source, query, *, candidates="all"):
+                self.calls.append((source["name"], query))
+                if query == "甲甲":
+                    return [{"dict": source["name"], "word": query, "definition": "first"}], None
+                if query == "甲甲乙乙":
+                    return [], None
+                self.budget_exhausted = True
+                return [], "lookup_budget_exhausted"
+
+        client = LateBudgetClient(installed={"HanDict"})
+        with mock.patch.dict(os.environ, {"DANK_LOOKUP_TOKENIZER": "/definitely/missing"}, clear=False):
+            result, _ = self._lookup_with(config_for_tests(), client, "甲甲乙乙")
+        self.assertTrue(result["segmented"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["available_modes"], [])
+        self.assertEqual([item["key"] for item in result["token_items"]], ["0:甲甲", "1:甲乙", "2:乙乙"])
+        self.assertEqual(result["incomplete_tokens"], ["1:甲乙", "2:乙乙"])
+        self.assertEqual(result["incomplete_modes"], ["han"])
+
+    def test_complete_lookup_reports_no_incomplete_tokens(self):
+        client = FakeClient(
+            installed={"HanDict"},
+            responses={("HanDict", "人"): [{"dict": "HanDict", "word": "人", "definition": "person"}]},
+        )
+        result, _ = self._lookup_with(config_for_tests(), client, "人")
+        self.assertEqual(result["incomplete_tokens"], [])
+        self.assertEqual(result["incomplete_modes"], [])
 
     def _lookup_with(self, cfg, client, query):
         with tempfile.TemporaryDirectory() as directory:
@@ -410,6 +469,7 @@ class ProductionTimeoutBoundaryTests(unittest.TestCase):
             self.assertLess(elapsed, 0.8)
             self.assertEqual(result["error"]["code"], "lookup_timeout")
             self.assertIn("lookup_budget_exhausted", result["warnings"])
+            self.assertEqual(result["incomplete_modes"], ["en"])
             self.assertEqual(len(call_log.read_text(encoding="utf-8").splitlines()), 2)
 
     def test_result_returned_after_overall_deadline_is_rejected(self):
@@ -493,6 +553,16 @@ class SdcvBoundedProtocolTests(unittest.TestCase):
             )
 
             self.assertEqual(run["termination_reason"], "stderr_cap")
+            self.assertEqual(run["returncode"], -signal.SIGKILL)
+            self.assertEqual(
+                [
+                    decision
+                    for decision in run["runner_decisions"]
+                    if decision
+                    in {"timeout", "cancelled", "stdout_cap", "stderr_cap", "wait_timeout"}
+                ],
+                ["stderr_cap"],
+            )
             self.assertEqual(run["stderr_stored_bytes"], STDERR_CAP_BYTES)
             self.assertGreater(run["stderr_bytes"], STDERR_CAP_BYTES)
             self.assertLessEqual(run["stderr_bytes"], STDERR_CAP_BYTES + 1)
@@ -620,6 +690,188 @@ class StdinAdapterTests(unittest.TestCase):
         self.assertEqual([entry["word"] for entry in entries], ["word"])
         self.assertEqual(choices, [None, 0, None])
 
+    @staticmethod
+    def _headword_protocol_runner(headwords, calls):
+        """Fake sdcv: exact search hits `headwords`; fuzzy lists all of them."""
+
+        def protocol_runner(**kwargs):
+            query = kwargs["query"]
+            calls.append((query, kwargs["choice"]))
+            head = f"Enter word or phrase: {query}\n".encode("utf-8")
+            tail = b"\nEnter word or phrase: \n"
+            if query.startswith("/"):
+                options = "".join(
+                    f"{index})FixtureDict-->{word}\n" for index, word in enumerate(headwords)
+                )
+                first = json.dumps(
+                    {"dict": "FixtureDict", "word": headwords[0], "definition": "first"},
+                    ensure_ascii=False,
+                )
+                stdout = head + f"[{options}Your choice[-1 to abort]: 0\n{first}]".encode("utf-8") + tail
+                prompt_count = 1
+            else:
+                found = [
+                    {"dict": "FixtureDict", "word": word, "definition": f"def {word}"}
+                    for word in headwords
+                    if word == query
+                ]
+                stdout = head + json.dumps(found, ensure_ascii=False).encode("utf-8") + tail
+                prompt_count = 0
+            return (
+                {
+                    "returncode": 0,
+                    "termination_reason": None,
+                    "stdout_bytes": len(stdout),
+                    "choice_prompt_count": prompt_count,
+                    "process_group_reaped": True,
+                },
+                stdout,
+            )
+
+        return protocol_runner
+
+    def test_exact_only_uncased_query_runs_one_sdcv_process(self):
+        # A CJK query has no case/NFKC variants, so an exact-only source needs
+        # only its exact search; fuzzy candidates would all be discarded.
+        calls = []
+        runner = self._headword_protocol_runner(["春", "春天", "春節", "青春"], calls)
+        client = SdcvClient(executable="/bin/true", protocol_runner=runner)
+        entries, warning = client.query({"name": "FixtureDict"}, "春", candidates="variants")
+        self.assertIsNone(warning)
+        self.assertEqual([entry["word"] for entry in entries], ["春"])
+        self.assertEqual(calls, [("春", None)])
+
+    def test_exact_only_cased_query_fetches_only_casefold_variants(self):
+        calls = []
+        runner = self._headword_protocol_runner(["Linux", "Linum", "lignum", "LINUX"], calls)
+        client = SdcvClient(executable="/bin/true", protocol_runner=runner)
+        entries, warning = client.query({"name": "FixtureDict"}, "linux", candidates="variants")
+        self.assertIsNone(warning)
+        self.assertEqual(sorted(entry["word"] for entry in entries), ["LINUX", "Linux"])
+        fetched = [query for query, choice in calls if not query.startswith("/")]
+        self.assertEqual(fetched, ["linux", "Linux", "LINUX"])
+
+    def test_fallback_candidates_fetch_everything_only_without_an_exact_entry(self):
+        calls = []
+        runner = self._headword_protocol_runner(["Linum", "Cinura", "jinx"], calls)
+        client = SdcvClient(executable="/bin/true", protocol_runner=runner)
+        entries, _warning = client.query({"name": "FixtureDict"}, "Linux", candidates="fallback")
+        self.assertEqual([entry["word"] for entry in entries], ["Linum", "Cinura", "jinx"])
+
+        calls.clear()
+        runner = self._headword_protocol_runner(["Linux", "Linum", "Cinura"], calls)
+        client = SdcvClient(executable="/bin/true", protocol_runner=runner)
+        entries, _warning = client.query({"name": "FixtureDict"}, "Linux", candidates="fallback")
+        self.assertEqual([entry["word"] for entry in entries], ["Linux"])
+        self.assertEqual([query for query, _choice in calls], ["Linux", "/Linux"])
+
+    def test_lookup_passes_candidate_policy_from_source_policy(self):
+        config = {
+            "version": 2,
+            "modes": {
+                "en": {
+                    "sources": [
+                        {"name": "Exact", "when": "any", "exact_only": True},
+                        {"name": "Fuzzy", "when": "any", "exact_only": False},
+                    ]
+                }
+            },
+        }
+        client = FakeClient(installed=["Exact", "Fuzzy"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            lookup("word", config_path=path, client=client)
+            v1 = {"version": 1, "modes": {"en": {"sources": [
+                {"name": "Exact", "when": "any", "exact_only": True, "allow_related": True},
+            ]}}}
+            path.write_text(json.dumps(v1), encoding="utf-8")
+            lookup("word", config_path=path, client=client)
+        self.assertEqual(
+            client.candidate_policies,
+            [("Exact", "variants"), ("Fuzzy", "all"), ("Exact", "fallback")],
+        )
+
+    def test_v1_config_allow_related_keeps_related_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "config.json"
+            sources = [
+                {"name": "Gcide", "when": "any", "exact_only": True, "allow_related": True},
+                {"name": "Wikt", "when": "any", "exact_only": True, "allow_related": False},
+                {"name": "Moe", "when": "cjk", "exact_only": False, "allow_related": False},
+            ]
+            for version in (1, 2):
+                path.write_text(json.dumps({"version": version, "modes": {"en-en": {"sources": sources}}}),
+                                encoding="utf-8")
+                config, metadata = load_config(path)
+                policy = [source_exact_only(source) for source in config["modes"]["en-en"]["sources"]]
+                if version == 1:
+                    self.assertEqual(policy, [False, True, True])
+                    self.assertEqual(metadata["legacy_related_policy"], "v1_allow_related")
+                else:
+                    self.assertEqual(policy, [True, True, False])
+                    self.assertNotIn("legacy_related_policy", metadata)
+
+    def test_exact_homograph_prompt_is_aborted_and_every_entry_fetched(self):
+        # words.hk lists 為 (wai4, wai6) behind a choice prompt even for an
+        # exact search; an unanswered prompt used to block until timeout.
+        calls = []
+        options = b"[0)FixtureDict-->\xe7\x82\xba\n1)FixtureDict-->\xe7\x82\xba\n"
+        head = "Enter word or phrase: 為\n".encode("utf-8")
+
+        def protocol_runner(**kwargs):
+            query, choice = kwargs["query"], kwargs["choice"]
+            calls.append((query, choice))
+            if query.startswith("/"):
+                stdout = "Enter word or phrase: /為\n[]\nEnter word or phrase: \n".encode("utf-8")
+                return {"returncode": 0, "termination_reason": None, "stdout_bytes": len(stdout),
+                        "choice_prompt_count": 0, "process_group_reaped": True}, stdout
+            if choice is None:
+                stdout = head + options + b"Your choice[-1 to abort]: -1\n]\nEnter word or phrase: \n"
+                return {"returncode": 0, "termination_reason": None, "stdout_bytes": len(stdout),
+                        "choice_prompt_count": 1, "choice_aborted": True,
+                        "process_group_reaped": True}, stdout
+            entry = json.dumps({"dict": "FixtureDict", "word": "為", "definition": f"wai{choice}"},
+                               ensure_ascii=False).encode("utf-8")
+            stdout = (head + options + f"Your choice[-1 to abort]: {choice}\n".encode("ascii")
+                      + entry + b"]\nEnter word or phrase: \n")
+            return {"returncode": 0, "termination_reason": None, "stdout_bytes": len(stdout),
+                    "choice_prompt_count": 1, "process_group_reaped": True}, stdout
+
+        client = SdcvClient(executable="/bin/true", protocol_runner=protocol_runner)
+        entries, warning = client.query({"name": "FixtureDict", "allow_related": False}, "為")
+        self.assertIsNone(warning)
+        self.assertEqual([entry["definition"] for entry in entries], ["wai0", "wai1"])
+        self.assertEqual([choice for query, choice in calls if not query.startswith("/")], [None, 0, 1])
+
+    def test_unanswered_choice_prompt_is_aborted_by_protocol_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = write_shell(
+                pathlib.Path(directory) / "homograph-sdcv",
+                """
+                printf 'Enter word or phrase: '
+                read -r word
+                printf '%s\\n[0)FixtureDict-->%s\\n1)FixtureDict-->%s\\n' "$word" "$word" "$word"
+                printf 'Your choice[-1 to abort]: '
+                read -r choice
+                printf '%s\\n]\\n' "$choice"
+                printf 'Enter word or phrase: '
+                read -r rest || true
+                printf '\\n'
+                """,
+            )
+            started = time.monotonic()
+            run, stdout = run_bounded_protocol(
+                name="sdcv", argv=[str(fake)], environment=dict(os.environ),
+                query="為", choice=None, timeout_seconds=2.0,
+            )
+            self.assertLess(time.monotonic() - started, 1.0)
+            self.assertIsNone(run["termination_reason"])
+            self.assertTrue(run["choice_aborted"])
+            parsed = parse_protocol_stdout(stdout, query="為", choice=-1)
+            self.assertEqual(parsed["entries"], [])
+            self.assertEqual(len(parsed["options"]), 2)
+
     def test_external_tokenizer_receives_query_only_on_stdin(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -719,6 +971,225 @@ class StdinAdapterTests(unittest.TestCase):
                     )
                     self.assertGreaterEqual(observed, 896 * 1024)
                     self.assertLessEqual(observed, 2 * 1024 * 1024)
+
+
+FAKE_SESSION_SDCV = """
+# Interactive fake sdcv: --list-dicts, else prompt/echo/JSON until stdin EOF.
+# "/q" lists ten candidates behind a choice prompt; "為" has two homographs.
+for argument do
+    if [ "$argument" = "--list-dicts" ]; then
+        printf "%s\\n" "Dictionary's name   Word count" "Gcide    1" "WordNet    1"
+        exit 0
+    fi
+done
+dict=Gcide
+previous=""
+for argument do
+    [ "$previous" = "--use-dict" ] && dict=$argument
+    previous=$argument
+done
+printf '%s %s\\n' "$$" "$*" >> "$FAKE_CALL_LOG"
+while :; do
+    printf 'Enter word or phrase: '
+    IFS= read -r query || { printf '\\n'; exit 0; }
+    printf '%s\\n' "$query"
+    case "$query" in
+        /*)
+            word=${query#/}
+            printf '['
+            index=0
+            while [ $index -lt 10 ]; do
+                printf '%s)%s-->%s%s\\n' $index "$dict" "$word" $index
+                index=$((index+1))
+            done
+            printf 'Your choice[-1 to abort]: '
+            IFS= read -r choice || exit 0
+            printf '%s\\n' "$choice"
+            if [ "$choice" = "-1" ]; then printf ']\\n'
+            else printf '{"dict":"%s","word":"%s%s","definition":"fuzzy"}]\\n' "$dict" "$word" "$choice"; fi
+            ;;
+        為)
+            printf '[0)%s-->為\\n1)%s-->為\\nYour choice[-1 to abort]: ' "$dict" "$dict"
+            IFS= read -r choice || exit 0
+            printf '%s\\n' "$choice"
+            if [ "$choice" = "-1" ]; then printf ']\\n'
+            else printf '{"dict":"%s","word":"為","definition":"wai%s"}]\\n' "$dict" "$choice"; fi
+            ;;
+        slow)
+            sleep 5
+            ;;
+        Linux)
+            printf '[{"dict":"%s","word":"Linux","definition":"os"}]\\n' "$dict"
+            ;;
+        Linux[0-9])
+            printf '[{"dict":"%s","word":"%s","definition":"candidate"}]\\n' "$dict" "$query"
+            ;;
+        *)
+            printf '[]\\n'
+            ;;
+    esac
+done
+"""
+
+
+class SdcvSessionTests(unittest.TestCase):
+    """One sdcv process answers several stdin frames (plan A batch session)."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.directory.name)
+        self.fake = write_shell(self.root / "session-sdcv", FAKE_SESSION_SDCV)
+        self.call_log = self.root / "calls"
+        self.environment = dict(os.environ, FAKE_CALL_LOG=str(self.call_log))
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def _processes(self):
+        if not self.call_log.exists():
+            return []
+        return [line.split(" ", 1)[1] for line in self.call_log.read_text(encoding="utf-8").splitlines()]
+
+    def test_session_serves_exact_choice_and_abort_frames_in_one_process(self):
+        session = SdcvSession(name="sdcv", argv=[str(self.fake)], environment=self.environment)
+        run, frame = session.ask("Linux", timeout_seconds=2.0)
+        self.assertIsNone(run["termination_reason"])
+        self.assertTrue(run["session_alive"])
+        self.assertEqual(parse_frame(frame, query="Linux")["entries"][0]["definition"], "os")
+
+        run, frame = session.ask("/Linux", choice=0, timeout_seconds=2.0)
+        self.assertEqual(run["choice_prompt_count"], 1)
+        parsed = parse_frame(frame, query="/Linux", choice=0)
+        self.assertEqual([item["word"] for item in parsed["options"]][:2], ["Linux0", "Linux1"])
+        self.assertEqual(parsed["entries"][0]["word"], "Linux0")
+
+        run, frame = session.ask("為", timeout_seconds=2.0)
+        self.assertTrue(run["choice_aborted"])
+        parsed = parse_frame(frame, query="為", choice=-1)
+        self.assertEqual(parsed["entries"], [])
+        self.assertEqual(len(parsed["options"]), 2)
+
+        run, frame = session.ask("為", choice=1, timeout_seconds=2.0)
+        self.assertEqual(parse_frame(frame, query="為", choice=1)["entries"][0]["definition"], "wai1")
+
+        closed = session.close()
+        self.assertEqual(closed["returncode"], 0)
+        self.assertIsNone(closed["termination_reason"])
+        self.assertEqual(closed["session_frames"], 4)
+        self.assertEqual(closed["session_starts"], 1)
+        self.assertEqual(len(self._processes()), 1)
+
+    def test_session_frame_timeout_kills_process_and_next_ask_restarts(self):
+        session = SdcvSession(name="sdcv", argv=[str(self.fake)], environment=self.environment)
+        started = time.monotonic()
+        run, _frame = session.ask("slow", timeout_seconds=0.2)
+        # 0.2 s frame timeout plus at most 1 s of process-group reap polling.
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertEqual(run["termination_reason"], "timeout")
+        self.assertFalse(run["session_alive"])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(run["pid"], 0)
+
+        run, frame = session.ask("Linux", timeout_seconds=2.0)
+        self.assertIsNone(run["termination_reason"])
+        self.assertTrue(run["session_restarted"])
+        self.assertEqual(parse_frame(frame, query="Linux")["entries"][0]["word"], "Linux")
+        session.close()
+        self.assertEqual(len(self._processes()), 2)
+
+    def test_session_frame_stdout_cap_is_reported(self):
+        session = SdcvSession(name="sdcv", argv=[str(self.fake)], environment=self.environment)
+        run, _frame = session.ask("/Linux", choice=0, timeout_seconds=2.0, stdout_cap_bytes=16)
+        self.assertEqual(run["termination_reason"], "stdout_cap")
+        session.close()
+
+    def test_client_runs_one_process_per_source_and_search_kind(self):
+        # exact + ten fuzzy candidates + their exact re-queries used to cost
+        # 12 processes per source; split sessions cost one per search kind.
+        client = SdcvClient(executable=str(self.fake), timeout=2.0, fuzzy_in_exact_session=False)
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        entries, warning = client.query({"name": "Gcide", "exact_only": False}, "Linux", candidates="all")
+        self.assertIsNone(warning)
+        self.assertEqual([entry["word"] for entry in entries], ["Linux"] + [f"Linux{i}" for i in range(10)])
+        self.assertEqual(
+            self._processes(),
+            [
+                "--json --utf8-input --utf8-output --exact-search --use-dict Gcide",
+                "--json --utf8-input --utf8-output --use-dict Gcide",
+            ],
+        )
+        self.assertIsNone(client.close())
+        self.assertEqual(client._sessions, {})
+        self.assertEqual([log["session_frames"] for log in client.session_log], [11, 1])
+
+    def test_client_shares_one_session_for_exact_and_fuzzy_frames_by_default(self):
+        client = SdcvClient(executable=str(self.fake), timeout=2.0)
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        entries, warning = client.query({"name": "Gcide", "exact_only": False}, "Linux", candidates="all")
+        client.close()
+        self.assertIsNone(warning)
+        self.assertEqual(len(entries), 11)
+        self.assertEqual(self._processes(), ["--json --utf8-input --utf8-output --exact-search --use-dict Gcide"])
+
+    def test_client_homographs_are_fetched_within_the_session(self):
+        client = SdcvClient(executable=str(self.fake), timeout=2.0)
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        entries, warning = client.query({"name": "Gcide", "exact_only": True}, "為", candidates="variants")
+        client.close()
+        self.assertIsNone(warning)
+        self.assertEqual([entry["definition"] for entry in entries], ["wai0", "wai1"])
+        self.assertEqual(len(self._processes()), 1)
+
+    def test_lookup_counts_processes_per_source_not_per_candidate(self):
+        config = {
+            "version": 2,
+            "modes": {
+                "en": {
+                    "label": "EN",
+                    "default_for": ["latin"],
+                    "sources": [
+                        {"name": "Gcide", "when": "any", "exact_only": False},
+                        {"name": "WordNet", "when": "any", "exact_only": False},
+                    ],
+                }
+            },
+        }
+        path = self.root / "config.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        client = SdcvClient(executable=str(self.fake), timeout=2.0)
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        result, _vault = lookup("Linux", config_path=path, client=client)
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["available_modes"], ["en"])
+        self.assertIn("Linux0", result["related_by_mode"]["en"]["body"])
+        # One --exact-search session per source serves exact and fuzzy frames.
+        self.assertEqual(
+            self._processes(),
+            [
+                "--json --utf8-input --utf8-output --exact-search --use-dict Gcide",
+                "--json --utf8-input --utf8-output --exact-search --use-dict WordNet",
+            ],
+        )
+        self.assertEqual(client._sessions, {})
+
+    def test_sessions_survive_across_queries_until_close(self):
+        # Every token of a segmented lookup reuses the source's session.
+        client = SdcvClient(executable=str(self.fake), timeout=2.0, fuzzy_in_exact_session=False)
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        for query in ("Linux", "Linux", "nothing"):
+            client.query({"name": "Gcide", "exact_only": False}, query, candidates="all")
+        self.assertEqual(len(client._sessions), 2)
+        self.assertIsNone(client.close())
+        self.assertEqual(len(self._processes()), 2)
+        self.assertEqual(client._sessions, {})
+
+        client = SdcvClient(
+            executable=str(self.fake), timeout=2.0, session_scope="query", fuzzy_in_exact_session=False
+        )
+        client.environment["FAKE_CALL_LOG"] = str(self.call_log)
+        client.query({"name": "Gcide", "exact_only": True}, "Linux", candidates="variants")
+        self.assertEqual(client._sessions, {})
+        self.assertEqual(len(self._processes()), 4)
 
 
 class SdcvStdinProbeParserTests(unittest.TestCase):
@@ -893,6 +1364,55 @@ class DefinitionFormatTests(unittest.TestCase):
             )
             self.assertEqual(
                 resolve_definition_format({"name": "html fixture"}, config), "plain"
+            )
+
+    def test_ifo_in_nested_subdirectories_is_detected_like_sdcv(self):
+        # sdcv 0.5.5 loads dictionaries from subdirectories at any depth (the
+        # user's dic/wangli/wangli.ifo, dic/cc-cedict/cc-cedict.ifo …).
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "wangli").mkdir()
+            (root / "a/b/c").mkdir(parents=True)
+            self._ifo(root / "wangli", "wangli.ifo", "Nested HTML", "h")
+            self._ifo(root / "a/b/c", "deep.ifo", "Deep HTML", "h")
+            self._ifo(root / "a", "plain.ifo", "Nested Plain", "m")
+            config = {"stardict_data_dir": [str(root)]}
+            self.assertEqual(resolve_definition_format({"name": "Nested HTML"}, config), "html")
+            self.assertEqual(resolve_definition_format({"name": "Deep HTML"}, config), "html")
+            self.assertEqual(resolve_definition_format({"name": "Nested Plain"}, config), "plain")
+            self.assertEqual(
+                resolve_definition_format({"name": "Nested HTML", "data_dir": str(root)}, {}),
+                "html",
+            )
+
+    def test_symlinked_directories_are_followed_once(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other:
+            root = pathlib.Path(directory)
+            linked = pathlib.Path(other)
+            self._ifo(linked, "linked.ifo", "Linked HTML", "h")
+            (root / "dictionaries").mkdir()
+            (root / "dictionaries/link").symlink_to(linked, target_is_directory=True)
+            # A loop back to the data dir must neither hang nor count twice.
+            (root / "dictionaries/loop").symlink_to(root, target_is_directory=True)
+            self._ifo(root, "top.ifo", "Top HTML", "h")
+            config = {"stardict_data_dir": [str(root)]}
+            self.assertEqual(resolve_definition_format({"name": "Linked HTML"}, config), "html")
+            self.assertEqual(resolve_definition_format({"name": "Top HTML"}, config), "html")
+            # The same .ifo reached through two paths is one source, not a
+            # conflict with itself.
+            (root / "again").symlink_to(linked, target_is_directory=True)
+            self.assertEqual(resolve_definition_format({"name": "Linked HTML"}, config), "html")
+
+    def test_nested_conflicting_ifo_still_falls_back_plain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "one").mkdir()
+            (root / "two").mkdir()
+            self._ifo(root / "one", "x.ifo", "Twin", "h")
+            self._ifo(root / "two", "x.ifo", "Twin", "m")
+            self.assertEqual(
+                resolve_definition_format({"name": "Twin"}, {"stardict_data_dir": [str(root)]}),
+                "plain",
             )
 
     def test_conflict_mixed_missing_and_no_sametype_fall_back_plain(self):

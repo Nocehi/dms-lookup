@@ -28,6 +28,8 @@ import threading
 import time
 from typing import Any
 
+from quickshell_offscreen import launch_arguments, offscreen_environment
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "packaging/install-user.sh"
@@ -118,7 +120,7 @@ class Frontend:
         self.stderr = tempfile.NamedTemporaryFile(prefix="dank-lookup-ui-", suffix=".log")
         self.started_ns = time.monotonic_ns()
         self.process = subprocess.Popen(
-            [self.quickshell, "-c", "dank-lookup", "--allow-duplicate", "--no-color"],
+            launch_arguments(self.quickshell, "-c", "dank-lookup"),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=self.stderr,
@@ -279,7 +281,7 @@ class Frontend:
 
 def install_staged(home: pathlib.Path, env: dict[str, str]) -> None:
     completed = subprocess.run(
-        ["bash", str(INSTALLER)],
+        ["bash", str(INSTALLER), "--without-tokenizer"],
         capture_output=True,
         text=True,
         env=env,
@@ -354,14 +356,13 @@ printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s' \\
             encoding="utf-8",
         )
         selection_capture.chmod(0o700)
-        env = os.environ.copy()
+        env = offscreen_environment(os.environ)
         env.update(
             {
                 "HOME": str(home),
                 "XDG_CONFIG_HOME": str(home / ".config"),
                 "XDG_DATA_HOME": str(home / ".local/share"),
                 "XDG_RUNTIME_DIR": str(runtime),
-                "QT_QPA_PLATFORM": "offscreen",
                 "DANK_LOOKUP_BENCHMARK": "1",
                 "DANK_LOOKUP_COMMAND": str(home / ".local/bin/dank-lookup"),
                 "DANK_LOOKUP_SELECTION_COMMAND": str(selection_capture),

@@ -7,21 +7,26 @@ Item {
 
     property string ipcTarget: "dank-lookup"
     property string backendCommand: Quickshell.env("DANK_LOOKUP_COMMAND") || "dank-lookup"
-    property var themeOverride: null
-    readonly property var activeTheme: themeOverride || standaloneTheme
+    // Optional token host (the DMS wrapper): supplies LookupTheme token values
+    // by name. The tokens themselves always come from the one LookupTheme.
+    property var themeHost: null
+    readonly property var activeTheme: lookupTheme
 
     width: 0
     height: 0
     visible: false
 
     LookupTheme {
-        id: standaloneTheme
-        dark: (Quickshell.env("DANK_LOOKUP_THEME_VARIANT") || "dark") !== "light"
+        id: lookupTheme
+        host: root.themeHost
+        dark: root.themeHost && root.themeHost.dark !== undefined
+              ? root.themeHost.dark
+              : (Quickshell.env("DANK_LOOKUP_THEME_VARIANT") || "dark") !== "light"
     }
 
     MatugenThemeAdapter {
-        theme: standaloneTheme
-        path: root.themeOverride ? "" : (Quickshell.env("DANK_LOOKUP_THEME_FILE") || "")
+        theme: lookupTheme
+        path: root.themeHost ? "" : (Quickshell.env("DANK_LOOKUP_THEME_FILE") || "")
     }
 
     LookupController {
@@ -36,6 +41,8 @@ Item {
             surface_container_high: String(root.activeTheme.surface_container_high),
             on_surface: String(root.activeTheme.on_surface),
             outline: String(root.activeTheme.outline),
+            error: String(root.activeTheme.error),
+            on_error: String(root.activeTheme.on_error),
             dark: root.activeTheme.dark
         })
 
@@ -90,10 +97,13 @@ Item {
         id: popup
         title: "Dank Lookup"
         visible: false
-        implicitWidth: 620
-        implicitHeight: 460
-        minimumSize: Qt.size(440, 280)
-        maximumSize: Qt.size(760, 640)
+        // The window keeps a shadow margin around the card on every side.
+        implicitWidth: lookupTheme.windowWidth + 2 * lookupTheme.shadowPadding
+        implicitHeight: lookupTheme.windowHeight + 2 * lookupTheme.shadowPadding
+        minimumSize: Qt.size(lookupTheme.windowMinWidth + 2 * lookupTheme.shadowPadding,
+                             lookupTheme.windowMinHeight + 2 * lookupTheme.shadowPadding)
+        maximumSize: Qt.size(lookupTheme.windowMaxWidth + 2 * lookupTheme.shadowPadding,
+                             lookupTheme.windowMaxHeight + 2 * lookupTheme.shadowPadding)
         color: "transparent"
 
         FocusScope {
@@ -139,7 +149,7 @@ Item {
             property: "opacity"
             from: 0.35
             to: 1
-            duration: 170
+            duration: lookupTheme.appearDuration
             easing.type: Easing.OutCubic
         }
 
@@ -148,7 +158,7 @@ Item {
             property: "scale"
             from: 0.985
             to: 1
-            duration: 170
+            duration: lookupTheme.appearDuration
             easing.type: Easing.OutCubic
         }
     }
