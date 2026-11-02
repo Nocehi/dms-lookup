@@ -343,6 +343,38 @@ class DetectionRoutingTests(unittest.TestCase):
         self.assertIn("lookup_budget_exhausted", result["warnings"])
         self.assertEqual(result["error"]["code"], "lookup_timeout")
 
+    def test_token_cut_short_by_budget_is_reported_at_top_level(self):
+        class LateBudgetClient(FakeClient):
+            budget_exhausted = False
+
+            def query(self, source, query, *, candidates="all"):
+                self.calls.append((source["name"], query))
+                if query == "甲甲":
+                    return [{"dict": source["name"], "word": query, "definition": "first"}], None
+                if query == "甲甲乙乙":
+                    return [], None
+                self.budget_exhausted = True
+                return [], "lookup_budget_exhausted"
+
+        client = LateBudgetClient(installed={"HanDict"})
+        with mock.patch.dict(os.environ, {"DANK_LOOKUP_TOKENIZER": "/definitely/missing"}, clear=False):
+            result, _ = self._lookup_with(config_for_tests(), client, "甲甲乙乙")
+        self.assertTrue(result["segmented"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["available_modes"], [])
+        self.assertEqual([item["key"] for item in result["token_items"]], ["0:甲甲", "1:甲乙", "2:乙乙"])
+        self.assertEqual(result["incomplete_tokens"], ["1:甲乙", "2:乙乙"])
+        self.assertEqual(result["incomplete_modes"], ["han"])
+
+    def test_complete_lookup_reports_no_incomplete_tokens(self):
+        client = FakeClient(
+            installed={"HanDict"},
+            responses={("HanDict", "人"): [{"dict": "HanDict", "word": "人", "definition": "person"}]},
+        )
+        result, _ = self._lookup_with(config_for_tests(), client, "人")
+        self.assertEqual(result["incomplete_tokens"], [])
+        self.assertEqual(result["incomplete_modes"], [])
+
     def _lookup_with(self, cfg, client, query):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "config.json"

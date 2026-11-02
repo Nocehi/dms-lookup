@@ -1337,6 +1337,7 @@ def lookup(
         "token_items": [],
         "results_by_token": {},
         "segmentation": {"engine": None, "warning": None},
+        "incomplete_tokens": [],
         "error": None,
         "query_truncated": query_too_long,
         "config": config_meta,
@@ -1426,8 +1427,28 @@ def lookup(
                     vault["full_blobs"].update(token_vault["full_blobs"])
                     aggregate_warnings.update(token_data.get("warnings", []))
                 base["warnings"] = sorted(aggregate_warnings)
+                # A token cut short by the budget must stay visible: fold its
+                # modes into the top-level list the card reads.
+                incomplete_tokens = [
+                    item["key"]
+                    for item in token_items
+                    if results_by_token[item["key"]].get("incomplete_modes")
+                ]
+                if incomplete_tokens:
+                    token_modes = {
+                        mode
+                        for key in incomplete_tokens
+                        for mode in results_by_token[key]["incomplete_modes"]
+                    }
+                    ordered_modes = [str(key) for key in config.get("modes", {})]
+                    base["incomplete_modes"] = [
+                        mode
+                        for mode in ordered_modes
+                        if mode in token_modes or mode in base.get("incomplete_modes", [])
+                    ]
                 if any(item["available_modes"] for item in results_by_token.values()):
                     base["segmented"] = True
+                    base["incomplete_tokens"] = incomplete_tokens
                     base["tokens"] = tokens
                     base["token_items"] = token_items
                     base["results_by_token"] = results_by_token

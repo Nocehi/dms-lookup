@@ -44,6 +44,7 @@ Item {
     property var availableModes: []
     property var unavailableModes: []
     property var incompleteModes: []
+    property var incompleteTokens: []
     property var candidateModes: []
     property string activeMode: ""
     property bool showRelated: false
@@ -104,6 +105,7 @@ Item {
         availableModes = []
         unavailableModes = []
         incompleteModes = []
+        incompleteTokens = []
         candidateModes = []
         activeMode = ""
         showRelated = false
@@ -347,6 +349,7 @@ Item {
         availableModes = data.available_modes || modeKeys(resultsByMode)
         unavailableModes = data.unavailable_modes || []
         incompleteModes = data.incomplete_modes || []
+        incompleteTokens = data.incomplete_tokens || []
         candidateModes = data.candidate_modes || []
         var preferredMode = requestedMode || data.default_mode
         var preferredTokenKey = requestedTokenKey
@@ -380,6 +383,22 @@ Item {
         scrollResetRequested()
         if (benchmarkEnabled)
             pendingResultQmlFrameTick = true
+    }
+
+    // Tokens cut short by the lookup budget are named before bare modes, so a
+    // segmented lookup never silently shows empty tokens.
+    function incompleteLabel() {
+        if (incompleteTokens.length > 0) {
+            var names = []
+            for (var i = 0; i < tokenItems.length; ++i) {
+                if (incompleteTokens.indexOf(tokenItems[i].key) >= 0)
+                    names.push(tokenItems[i].token)
+            }
+            if (names.length > 0)
+                return "Timed out: " + names.join(", ")
+        }
+        return incompleteModes.length > 0
+                ? "Timed out: " + incompleteModes.join(", ") : ""
     }
 
     function normalizedTokenItems(items, legacyTokens) {
@@ -778,7 +797,8 @@ Item {
                 full_ref: activeFullRef(),
                 full_chars: activeFullChars(),
                 truncated: activeTruncated(),
-                empty_message: emptyStateMessage()
+                empty_message: emptyStateMessage(),
+                incomplete_label: incompleteLabel()
             })
         }
         if (action === "meta") {

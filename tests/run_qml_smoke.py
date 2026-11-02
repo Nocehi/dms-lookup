@@ -357,6 +357,8 @@ def segmented_miss_response(
         "default_mode": None,
         "available_modes": [],
         "segmented": True,
+        "incomplete_modes": ["han"],
+        "incomplete_tokens": ["0:空"],
         "token_items": [
             {"key": "0:空", "index": 0, "token": "空"},
             {"key": "1:首", "index": 1, "token": "首"},
@@ -740,6 +742,8 @@ def run_smoke(timeout: float) -> None:
             require(automatic.get("token_key") == "1:首"
                     and automatic.get("body") == "first-usable-preview",
                     f"first usable token was not selected: {automatic}")
+            require(automatic.get("incomplete_label") == "Timed out: 空",
+                    f"token cut short by the budget was not named: {automatic}")
             require(frontend.action("copy-payload") == "first-usable-preview",
                     "automatic token Copy payload used the Whole result")
             open_capture.unlink(missing_ok=True)

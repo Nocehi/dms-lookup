@@ -293,9 +293,8 @@ Item {
                          ? "Preview · full entry: "
                            + root.controller.activeFullChars() + " chars"
                          : "Preview · full entry available")
-                      : (root.controller.incompleteModes.length > 0
-                         ? "Timed out: "
-                           + root.controller.incompleteModes.join(", ")
+                      : (root.controller.incompleteLabel() !== ""
+                         ? root.controller.incompleteLabel()
                          : (root.controller.unavailableModes.length > 0
                             ? "Unavailable: "
                               + root.controller.unavailableModes.join(", ") : ""))
