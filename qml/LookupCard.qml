@@ -112,9 +112,29 @@ Item {
             }
         }
 
+        Text {
+            id: pronunciationLabel
+            anchors.top: header.bottom
+            anchors.topMargin: root.theme.spacingXS
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: root.theme.popoutPadding
+            anchors.rightMargin: root.theme.popoutPadding
+            text: root.controller.phase === "ready"
+                  ? root.controller.activeDisplay.pronunciation : ""
+            visible: text !== ""
+            color: root.theme.on_surface
+            opacity: root.theme.textSecondary
+            font.family: root.theme.fontUi
+            font.pixelSize: root.theme.fontSizeMedium
+            elide: Text.ElideRight
+        }
+
         Flickable {
             id: modeStrip
-            anchors.top: header.bottom
+            // Anchor past the pronunciation only while it shows; a height
+            // binding on that Text made a binding loop.
+            anchors.top: pronunciationLabel.visible ? pronunciationLabel.bottom : header.bottom
             anchors.topMargin: visible ? root.theme.gap : 0
             anchors.left: parent.left
             anchors.right: parent.right
@@ -288,12 +308,14 @@ Item {
         Item {
             id: metadata
             anchors.top: tokenStrip.bottom
-            anchors.topMargin: root.theme.spacingS
+            anchors.topMargin: visible ? root.theme.spacingS : 0
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.leftMargin: root.theme.popoutPadding
             anchors.rightMargin: root.theme.popoutPadding
-            height: Math.max(sourceLabel.implicitHeight, availabilityLabel.implicitHeight)
+            visible: sourceLabel.text !== "" || availabilityLabel.text !== ""
+            height: visible ? Math.max(sourceLabel.implicitHeight,
+                                       availabilityLabel.implicitHeight) : 0
 
             Text {
                 id: sourceLabel
@@ -301,15 +323,16 @@ Item {
                 anchors.right: availabilityLabel.left
                 anchors.rightMargin: root.theme.spacingS
                 anchors.verticalCenter: parent.verticalCenter
+                // Each section names its own dictionary and the mode chip names
+                // the mode, so this line only marks related results and names
+                // the source of an unlabeled (flat) body.
                 text: {
-                    var kind = root.controller.showRelated ? root.ui("Related", "相關")
-                                                           : root.ui("Exact", "精確")
-                    var mode = root.controller.activeLabel()
+                    var pieces = []
+                    if (root.controller.showRelated)
+                        pieces.push(root.ui("Related results", "相關結果"))
+                    var sections = root.controller.activeDisplay.sections
                     var source = root.controller.activeSubtitle()
-                    var pieces = [kind]
-                    if (mode)
-                        pieces.push(mode)
-                    if (source)
+                    if (source && sections.length === 1 && sections[0].source === "")
                         pieces.push(source)
                     return pieces.join(" · ")
                 }
@@ -455,21 +478,48 @@ Item {
                          && root.controller.activeBody() !== ""
                 clip: true
                 contentWidth: width
-                contentHeight: definitionText.height
+                contentHeight: sectionColumn.height
                 boundsBehavior: Flickable.StopAtBounds
                 flickableDirection: Flickable.VerticalFlick
 
-                Text {
-                    id: definitionText
+                Column {
+                    id: sectionColumn
                     width: definitionScroll.width
-                    text: root.controller.activeBody()
-                    textFormat: Text.PlainText
-                    color: root.theme.on_surface
-                    font.family: root.theme.fontUi
-                    font.pixelSize: root.theme.fontSizeMedium
-                    lineHeightMode: Text.ProportionalHeight
-                    lineHeight: root.theme.bodyLineHeight
-                    wrapMode: Text.Wrap
+                    spacing: root.theme.spacingL
+
+                    Repeater {
+                        model: root.controller.activeDisplay.sections
+
+                        Column {
+                            id: section
+                            required property var modelData
+                            width: sectionColumn.width
+                            spacing: root.theme.spacingXS
+
+                            Text {
+                                width: parent.width
+                                visible: section.modelData.source !== ""
+                                text: section.modelData.source
+                                color: root.theme.primary
+                                font.family: root.theme.fontUi
+                                font.pixelSize: root.theme.fontSizeSmall
+                                font.weight: Font.Medium
+                                elide: Text.ElideRight
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: section.modelData.text
+                                textFormat: Text.PlainText
+                                color: root.theme.on_surface
+                                font.family: root.theme.fontUi
+                                font.pixelSize: root.theme.fontSizeMedium
+                                lineHeightMode: Text.ProportionalHeight
+                                lineHeight: root.theme.bodyLineHeight
+                                wrapMode: Text.Wrap
+                            }
+                        }
+                    }
                 }
 
                 T.ScrollBar.vertical: T.ScrollBar {
