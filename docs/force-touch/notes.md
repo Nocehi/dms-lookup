@@ -74,6 +74,8 @@ sent
 
 以 sudo 執行 `--fire --count 3`，觸控板震了三下，確認在 A3120（USB）上能按需觸發 Taptic 回饋。
 
+**藍牙：待測（2026-11-06 起）。** 外部專案已在 `0265` 經藍牙時按需觸發觸覺（見 2.1），A3120 經藍牙尚未試過。新版腳本 `tools/force-touch/haptic_pulse.py` 按產品 ID 配對，同時認 USB 廠商 ID `05ac` 與藍牙廠商 ID `004c`，並支援藍牙的 `0xF2` 報告格式；步驟見 [`bluetooth-haptics-test.md`](bluetooth-haptics-test.md)。
+
 ---
 
 ## 二、現成方案與參考資料
@@ -83,11 +85,14 @@ sent
 | 來源 | 內容 | 對我們的意義 |
 |---|---|---|
 | [AppleMagicTouchstreamLP](https://github.com/disarmyouwitha/AppleMagicTouchstreamLP/blob/HEAD/windows_linux/AppleMagicTouchstream.Linux/Platform/README.md) | 逆向得出 Actuator 介面的 0x53 輸出報告，並在 Linux 上以 0x0324 實測可用 | 我們的報告格式與預設強度即取自此處 |
-| [Fressl 核心補丁](https://lkml.iu.edu/hypermail/linux/kernel/2605.1/13417.html)（2026 年 5 月，未合併） | `haptic_click` 參數，經 feature report 0x22/0x23 設定持久的點擊手感（調輕或關閉） | 只能改「每次點擊」的手感，不能按需觸發 |
+| [Fressl 核心補丁 v2](https://patchew.org/linux/20260514171524.110189-1-christian@fressl.at/)（2026-05-14；[v1 LKML](https://lkml.iu.edu/hypermail/linux/kernel/2605.1/13417.html)） | `haptic_click` 模組參數：0＝不變、1＝silent-low、2＝關閉。以 feature report `0x22`（點擊）與 `0x23`（放開）設定持久的韌體點擊手感；`0x53` 只用來辨認接受這些報告的介面。程式只走 USB 路徑（`is_usb_magictrackpad2()`），沒有藍牙分支。Jiri Kosina 問為何要 `READ_ONCE()`，頁面上沒有作者回覆，也沒有「已套用」記錄（2026-11-06 經 patchew 頁面核對；lore 與 hid.git 未查） | 核心只打算讓人調韌體點擊手感，不打算開放自訂觸覺；用戶態方案在可見將來仍有理由存在 |
+| [Magic-TP-extended](https://github.com/knespii/Magic-TP-extended)（Python，2026-10） | 不接管點擊；按鍵已按下且壓力過門檻時，經 hidraw 寫 15 字節報告 `F2 53 01 <強度> 78 02 <sharp> 24 30 06 01 <deep> 18 48 12` 多震一下；回落後播較弱的放開脈衝並重新武裝 | **藍牙可震的直接證據**：README 標明只在 `004C:0265`（藍牙）測過，`0324` 藍牙／USB 皆「untested」。做法與我們幾乎相同；報告是 `0xF2` 包住與我們 USB 版同構的 `53 01 …` 內容 |
+| [LinuxMagicForce](https://github.com/Eriskii/LinuxMagicForce)（Rust，2026-09） | 定位為藍牙版 Magic Trackpad 2 觸覺守護程式：以 `F2 21 01` 切到 host-click 模式，自己判定點擊與 force click，經 uinput 輸出按鍵，並送 `0xF2` 觸覺報告；退出時恢復韌體點擊。需 root | 第二個藍牙證據，但程式的自動偵測只認藍牙 `0265`；USB-C 版只走 USB 路徑。對 `0324` 藍牙不構成證據（2026-11-06 讀原始碼 `auto_device()`） |
+| [linux-trackpad-driver](https://github.com/aaronroquefonseca/linux-trackpad-driver)（Rust，v0.1.4，2026-11-04） | 完整用戶態驅動：host-click、壓力點擊、第二層 force（「Second-level arming, hysteresis」），列出 `004c:0324` 藍牙 ID | README 稱藍牙「implemented but not hardware-verified」，CHANGELOG 0.1.4 則稱「Bluetooth that works」，兩者矛盾，不當證據。其安裝說明指出藍牙 hidraw 沒有 USB 祖先，udev 須用 `KERNELS=="0005:004C:0324.*"` 配對（見 3.3） |
 | [linux-apple-trackpad](https://github.com/benjaminwestern/linux-apple-trackpad)（DKMS） | 強度檔位、110 Hz 回報率；正式的 `FF_HAPTIC` 介面仍在規劃 | 將來若有核心級觸覺 API，可改用它取代 hidraw |
 | libinput、niri | 沒有觸覺 API | 只能在用戶態直接寫 hidraw |
 
-限制：藍牙連接時，Linux 看不到 Actuator 介面，無法觸發觸覺。
+~~限制：藍牙連接時，Linux 看不到 Actuator 介面，無法觸發觸覺。~~ 2026-11-06 更正：這是我們只找 `05ac` 與輸出報告 `0x53` 造成的推論，不是實測。外部專案已在 `0265` 經藍牙觸發觸覺（報告 ID `0xF2`），A3120 經藍牙待測，見 1.4。
 
 ### 2.2 壓力與 Force Click 行為
 
@@ -107,6 +112,14 @@ Apple 的設計詳見 [apple-force-touch-survey.md](apple-force-touch-survey.md)
 | 拖曳時停用 stage 2 | 可從 `ABS_MT_POSITION_X/Y` 判斷位移，尚未實作 |
 | 觸覺樣式 | 以「強度 × 次數 × 間隔」自訂，三種都能模擬；限 USB |
 | 游標下的內容 | 無法得知。只能讀 PRIMARY 選取，所以必須先選字再深壓 |
+
+外部壓力參考（[Magic-TP-extended](https://github.com/knespii/Magic-TP-extended) README，藍牙 `0265`）：普通點擊峰值約 64–77，刻意重按 117–253；預設門檻 140，回落到 120 以下（門檻減滯後 20）才重新武裝。我們的 160 落在其重按區間的中下段，與我們自己量的數據一致。但它只看峰值，我們的自然使用數據顯示普通點擊峰值可達 171–198，所以我們靠 80 ms 維持時間分辨（見 3.3），不能直接照搬 140。[LinuxMagicForce](https://github.com/Eriskii/LinuxMagicForce) 的預設值為普通 70、force 165、force 重新武裝 125。
+
+### 2.2.1 接管點擊與否的取捨
+
+- **LinuxMagicForce 接管**（host-click 模式，需 root）：因為點擊由它自己發出，它能做我們做不到的事。上次點擊放開後 350 ms 內的第二次單指按壓，force 門檻改用 220（預設 165），讓雙擊拖曳不易誤觸 force；拖曳中改用較低的放開門檻（30），避免拖到一半鬆脫。
+- **Magic-TP-extended 不接管**：README 明言不切 host-click，守護程式停掉時點擊仍然正常。
+- **我們選了不接管**：監聽器不 grab、不需 root，服務掛掉也不影響點擊。代價是韌體已經發出的那一下點擊無法取消，深壓只能在旁觀察，再用觸覺與「放開時才動作」去緩和。dogfood 階段維持不接管；雙擊時窗提高門檻的做法不需接管也能做（只影響我們何時判為深壓），可記為誤觸改善的候選。
 
 ### 2.3 專案內早期路線
 
@@ -160,7 +173,7 @@ sudo rm /etc/udev/rules.d/70-dank-magic-trackpad-haptic.rules && sudo udevadm co
 ### 3.3 已知限制
 
 - **裕度在時間軸，不在壓力軸**：自然使用數據（`margin-probe/`，34 次，其中深壓 5 次）顯示，普通點擊壓力 ≥ 160 的最長連續時間 ≤ 44 ms，深壓則持續 265–818 ms；維持時間 80 ms 正落在兩者之間。壓力門檻 160 只是入口條件：普通點擊的峰值可達 171，`area-probe/` 中甚至有 198，壓力上本來就沒有乾淨的分界，靠的是「能否在 160 以上停留 80 ms」。深壓樣本仍少，第一階段日誌（含設計稿 6.1 的重試率）會再確認。多級壓力與以時間做第二級均不可行，見設計稿 9.1。
-- **觸覺只限 USB**：藍牙連接時查詢照常運作，只是不會震。
+- **觸覺：USB 已驗證，藍牙待測**：藍牙連接時查詢照常運作。現行監聽程式只在 `05ac` 底下找觸覺節點，所以藍牙下不會震；udev 規則用 `ATTRS{idVendor}=="05ac"`，藍牙 hidraw 沒有 USB 祖先，預期不會套用（須加 `KERNELS=="0005:004C:0324.*"`）。兩者都等藍牙測試結果再改。
 - **樣本有限**：只有單指、USB、兩輪樣本。換手指、斜按、改用藍牙時數值可能不同。
 - **須先選字**：Linux 點擊不會自動選字，未選字時深壓查不到東西。
 - **實驗性質**：監聽程式、服務與 udev 規則已納入 repo（2026-11-06），但預設安裝程式 `packaging/install-user.sh` 不會安裝或啟用它們，須另行執行 `packaging/install-force-touch.sh`。
@@ -226,8 +239,8 @@ sudo rm /etc/udev/rules.d/70-dank-magic-trackpad-haptic.rules && sudo udevadm co
 
 | 路線 | 做法 | 好處 | 代價 |
 |---|---|---|---|
-| A. 私有 hidraw（現行） | 用戶態程式寫 hidraw 送 `0x53` | 已可用，手感已驗證 | 要 udev uaccess 規則；只驗證過 USB；格式靠逆向 |
-| B. 內核轉接 | 在 hid-magicmouse 為 0x0265／0x0324 宣告 `FF_HAPTIC` 與 `INPUT_PROP_PRESSUREPAD`，把 FF 播放翻譯成 `0x53` | 可提交上游；用戶態經標準 evdev FF 介面觸發，不再需要 hidraw 權限與 udev 規則；libinput 等也能據 `PRESSUREPAD` 識別裝置 | 內核開發與上游審閱；`0x53` 位於另一個 USB 介面（Actuator），驅動要跨介面配對；藍牙下的觸覺介面仍未知 |
+| A. 私有 hidraw（現行） | 用戶態程式寫 hidraw 送 `0x53`（藍牙為 `0xF2` 包住同一內容） | 已可用，手感已驗證；外部專案顯示藍牙（`0265`）也可行 | 要 udev uaccess 規則；A3120 只驗證過 USB；格式靠逆向 |
+| B. 內核轉接 | 在 hid-magicmouse 為 0x0265／0x0324 宣告 `FF_HAPTIC` 與 `INPUT_PROP_PRESSUREPAD`，把 FF 播放翻譯成 `0x53` | 可提交上游；用戶態經標準 evdev FF 介面觸發，不再需要 hidraw 權限與 udev 規則；libinput 等也能據 `PRESSUREPAD` 識別裝置 | 內核開發與上游審閱；`0x53` 位於另一個 USB 介面（Actuator），驅動要跨介面配對；藍牙下要改送 `0xF2`（`0265` 已知，`0324` 待測） |
 
 建議：短期維持 A；B 等匯流第一階段穩定後再評估，屬於可上游的獨立專案。
 
@@ -235,7 +248,7 @@ sudo rm /etc/udev/rules.d/70-dank-magic-trackpad-haptic.rules && sudo udevadm co
 
 - **藍牙協定棧**：ChromeOS 自 122 版起逐步以 Floss 取代 BlueZ。Floss 是 ChromeOS 用於 Android Fluoride 協定棧的前端，與 BlueZ 是不同的實作（[chromeos.dev，2024-06-11](https://chromeos.dev/en/posts/androids-bluetooth-stack-fluoride-comes-to-chromeos)）。
 - **Force click**：未找到 ChromeOS 對 Apple force click 做特別處理的一手資料。能確定的只有內核一層：hid-magicmouse 只提供壓力與單一按鍵，因此任何使用此驅動的系統，在沒有額外用戶態判定的情況下，都只會收到普通點擊。[Chrome Unboxed 2018-10-19](https://chromeunboxed.com/news/wireless-trackpad-chromebook-apple-magic-trackpad-2/) 的實測也只提到實體點擊手感。ChromeOS 的手勢庫是否使用壓力，**未核實**。
-- **未核實**：Magic Trackpad 走傳統藍牙 HID（BR/EDR，L2CAP）還是 BLE HOGP；macOS 藍牙回報率「約 90–120 Hz」。後者沒有出處，在用 margin_probe 實測藍牙前，不應作為結論依據。
+- **未核實**：Magic Trackpad 走傳統藍牙 HID（BR/EDR，L2CAP）還是 BLE HOGP；macOS 藍牙回報率「約 90–120 Hz」。後者沒有出處，在用 margin_probe 實測藍牙前，不應作為結論依據。USB 基準（2026-11-06 由既有 `margin-probe/frames-*.csv` 算出）：按住時相鄰幀間隔中位數 11.0 ms（約 91 Hz；第 10–90 百分位 10.7–12.0 ms，n=1169）。這是「有變化的幀」的間隔，不是韌體標稱回報率；藍牙量法見 [`bluetooth-haptics-test.md`](bluetooth-haptics-test.md) 第五節；原始數據不在 repo。
 
 ---
 
@@ -250,7 +263,8 @@ sudo rm /etc/udev/rules.d/70-dank-magic-trackpad-haptic.rules && sudo udevadm co
 | `tools/force-touch/pressure_probe.py` | 唯讀壓力取樣，輸出每次接觸的壓力與摘要 |
 | `tools/force-touch/margin_probe.py` | 自然使用下的被動裕度量測（峰值與 ≥160 最長連續時間） |
 | `tools/force-touch/area_probe.py` | 壓力與接觸面積取樣（Firm Press 評估，已放棄） |
-| `tools/force-touch/haptic_pulse.py` | 觸覺實驗，預設只列出節點，`--fire` 才發送 |
+| `tools/force-touch/haptic_pulse.py` | 觸覺實驗，USB／藍牙皆認（按產品 ID），預設只列出節點，`--fire` 才發送 |
+| `docs/force-touch/bluetooth-haptics-test.md` | A3120 藍牙觸覺測試步驟（含 udev 與回報率量測） |
 | `docs/force-touch/force-event-bus-design.md` | force 事件匯流設計：傳輸方式、事件格式、認領規則、遷移步驟、資料偵測 |
 | `docs/force-touch/apple-force-touch-survey.md` | Apple Force Touch 用途與 API 調查；第五、六節為其他平台、社區專案與 niri/DMS 點子 |
 
