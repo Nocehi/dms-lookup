@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 
 Item {
     id: root
@@ -105,6 +106,21 @@ Item {
         maximumSize: Qt.size(lookupTheme.windowMaxWidth + 2 * lookupTheme.shadowPadding,
                              lookupTheme.windowMaxHeight + 2 * lookupTheme.shadowPadding)
         color: "transparent"
+
+        // Blur what is behind the card, like DMS popouts (ext-background-effect;
+        // a compositor without it ignores the request). Re-set on every show,
+        // because the surface is unmapped while hidden.
+        BackgroundEffect.blurRegion: lookupTheme.backgroundBlur && popup.visible
+                                     ? cardBlurRegion : null
+
+        Region {
+            id: cardBlurRegion
+            x: lookupTheme.shadowPadding
+            y: lookupTheme.shadowPadding
+            width: Math.max(0, popup.width - 2 * lookupTheme.shadowPadding)
+            height: Math.max(0, popup.height - 2 * lookupTheme.shadowPadding)
+            radius: lookupTheme.windowRadius
+        }
 
         FocusScope {
             anchors.fill: parent
