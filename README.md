@@ -18,7 +18,8 @@ the same shared controller/card.
 - Local `sdcv`/StarDict lookup; no default network, LLM, OCR, encyclopedia,
   translation, telemetry, or query history.
 - The resident UI never monitors or reads the clipboard. The selection command
-  reads it once, only after an explicit invocation.
+  reads the primary selection once, only after an explicit invocation. Falling
+  back to the regular clipboard is opt-in and never applies to force press.
 - Exact and Related results are distinct. All exact modes that return a result
   remain available for manual switching.
 - Fresh routing includes `han`, `en`, `ja`, and `yue`; a mode is visibly
@@ -34,7 +35,7 @@ shortcut
       -> prepare IPC: show loading frame and allocate request id
       -> capturePrepared IPC: UUID/source metadata only
   -> resident standalone Quickshell controller
-      -> explicit primary capture (clipboard fallback) through a child pipe
+      -> explicit primary capture (opt-in clipboard fallback) through a child pipe
       -> bounded stdin envelope to `dank-lookup backend-request`
       -> fixed private `backend.sock`; tokenizer/sdcv queries over stdin
       -> apply only matching request-id + sequence
@@ -76,6 +77,19 @@ Add a compositor shortcut, for example in niri:
 ```kdl
 Mod+Alt+D repeat=false { spawn-sh "$HOME/.local/bin/dank-lookup-selection"; }
 ```
+
+By default only the primary selection is read; when nothing is selected the
+card says so. To also fall back to the regular clipboard, add this top-level
+key to `~/.config/dank-lookup/config.json`:
+
+```json
+"selection": { "clipboard_fallback": true }
+```
+
+Only the literal `true` enables it. An invocation with the source name
+`force-press` (`dank-lookup-selection force-press`) never reads the clipboard,
+even with the key set, because a deep press over unselected text is easy to
+trigger by accident.
 
 and a title-based floating rule:
 

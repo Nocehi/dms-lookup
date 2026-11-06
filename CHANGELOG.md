@@ -2,6 +2,10 @@
 
 ## Unreleased — standalone-first 0.8.0
 
+- Make the clipboard fallback opt-in (`"selection": {"clipboard_fallback":
+  true}` in `config.json`, default off). The `force-press` source never reads
+  the clipboard. The capture command now receives the source name as its
+  second argument.
 - Add a standalone Quickshell frontend with no `qs.*`/DMS imports; retain DMS
   only as an optional 1.4.6+ `daemon` theme/IPC wrapper.
 - Replace synchronous `/tmp` file polling with two-stage Quickshell IPC:

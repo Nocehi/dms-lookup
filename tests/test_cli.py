@@ -427,9 +427,17 @@ class CliTests(unittest.TestCase):
             """,
         )
 
-        def capture(primary, clipboard, primary_value="", clipboard_value=""):
+        fallback_config = self.root / "clipboard-fallback-config.json"
+        fallback_config.write_text(
+            json.dumps({"selection": {"clipboard_fallback": True}}), encoding="utf-8"
+        )
+
+        def capture(primary, clipboard, primary_value="", clipboard_value="",
+                    source=None, fallback=True):
             call_log.unlink(missing_ok=True)
             environment = self.env()
+            if fallback:
+                environment["DANK_LOOKUP_CONFIG"] = str(fallback_config)
             environment.update(
                 {
                     "PATH": str(command_dir) + os.pathsep + environment["PATH"],
@@ -442,8 +450,11 @@ class CliTests(unittest.TestCase):
                     "DANK_LOOKUP_CLIPBOARD_TIMEOUT_MS": "20",
                 }
             )
+            argv = ["bash", str(SELECTION), "--capture"]
+            if source is not None:
+                argv.append(source)
             completed = subprocess.run(
-                ["bash", str(SELECTION), "--capture"],
+                argv,
                 capture_output=True,
                 env=environment,
                 timeout=TEST_PROCESS_DEADLINE_SECONDS,
@@ -478,6 +489,42 @@ class CliTests(unittest.TestCase):
             "command_error", "none", "command_error", "command_error"
         ])
 
+        # Clipboard fallback is opt-in: without the config key the clipboard
+        # is never read, and the primary outcome is reported as-is.
+        disabled = capture("empty", "nonempty", clipboard_value="secret", fallback=False)
+        self.assertEqual(disabled[1:], [
+            "success_empty", "none", "success_empty", "not_attempted", ""
+        ])
+        self.assertEqual(call_log.read_text(encoding="utf-8").splitlines(), ["primary"])
+
+        disabled_timeout = capture("timeout", "nonempty", clipboard_value="secret",
+                                   fallback=False)
+        self.assertEqual(disabled_timeout[1:5], [
+            "timeout", "none", "timeout", "not_attempted"
+        ])
+
+        # A force press never falls back, even when the config opts in.
+        force_press = capture("empty", "nonempty", clipboard_value="secret",
+                              source="force-press")
+        self.assertEqual(force_press[1:], [
+            "success_empty", "none", "success_empty", "not_attempted", ""
+        ])
+        self.assertEqual(call_log.read_text(encoding="utf-8").splitlines(), ["primary"])
+
+        shortcut = capture("empty", "nonempty", clipboard_value="clipboard text",
+                           source="selection")
+        self.assertEqual(shortcut[2], "clipboard")
+
+        for value in ("yes", 1, None):
+            fallback_config.write_text(
+                json.dumps({"selection": {"clipboard_fallback": value}}), encoding="utf-8"
+            )
+            not_strict = capture("empty", "nonempty", clipboard_value="secret")
+            self.assertEqual(not_strict[4], "not_attempted", value)
+        fallback_config.write_text("{not json", encoding="utf-8")
+        self.assertEqual(capture("empty", "nonempty", clipboard_value="secret")[4],
+                         "not_attempted")
+
         invalid_environment = self.env()
         invalid_environment.update(
             {
@@ -509,7 +556,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(unavailable.returncode, 0, unavailable.stderr.decode())
         self.assertEqual(
             unavailable.stdout.decode().split("\n", 5)[1:5],
-            ["unavailable", "none", "unavailable", "unavailable"],
+            ["unavailable", "none", "unavailable", "not_attempted"],
         )
 
     def test_selection_capture_streams_text_with_a_hard_cap_and_reaps_producers(self):
@@ -551,6 +598,12 @@ class CliTests(unittest.TestCase):
                 "DANK_LOOKUP_CLIPBOARD_TIMEOUT_MS": "1000",
             }
         )
+        # Opt in so both producers are exercised and reaped.
+        fallback_config = self.root / "bounded-clipboard-fallback-config.json"
+        fallback_config.write_text(
+            json.dumps({"selection": {"clipboard_fallback": True}}), encoding="utf-8"
+        )
+        environment["DANK_LOOKUP_CONFIG"] = str(fallback_config)
 
         started = time.monotonic()
         completed = subprocess.run(

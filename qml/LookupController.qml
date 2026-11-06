@@ -176,7 +176,8 @@ Item {
             requestSequence: sequence,
             correlationId: requestId,
             captureSource: trimmed(source) || selectionSource || "selection",
-            command: [selectionCommand, "--capture"]
+            command: [selectionCommand, "--capture",
+                      trimmed(source) || selectionSource || "selection"]
         })
         if (!process) {
             phase = "error"

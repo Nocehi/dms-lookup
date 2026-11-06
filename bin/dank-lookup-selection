@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This script reads the selection only when explicitly invoked. It never runs a
+# This script reads the primary selection only when explicitly invoked. It never runs a
 # clipboard watcher and never interpolates selected text into shell code.
 umask 077
 CAPTURE_BYTE_CAP=16384
@@ -134,7 +134,34 @@ PY
     fi
 }
 
+# Clipboard fallback is opt-in: config.json must set
+# "selection": {"clipboard_fallback": true}. A force-press source never reads
+# the clipboard, because a deep press on unselected text is easy to trigger by
+# accident and would otherwise show whatever was last copied (e.g. a password).
+clipboard_fallback_enabled() {
+    local source="$1"
+    [[ "$source" == "force-press" ]] && return 1
+    python3 - 2>/dev/null <<'PY'
+import json
+import os
+import sys
+
+path = os.environ.get("DANK_LOOKUP_CONFIG")
+if not path:
+    home = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    path = os.path.join(home, "dank-lookup", "config.json")
+try:
+    with open(os.path.expanduser(path), encoding="utf-8") as handle:
+        config = json.load(handle)
+    enabled = config["selection"]["clipboard_fallback"] is True
+except Exception:
+    enabled = False
+sys.exit(0 if enabled else 1)
+PY
+}
+
 capture_selection() {
+    local source="$1"
     local primary_timeout
     local clipboard_timeout
     local primary_status
@@ -151,7 +178,7 @@ capture_selection() {
         selected_source="primary"
         final_status="$primary_status"
         query="$CAPTURE_VALUE"
-    else
+    elif clipboard_fallback_enabled "$source"; then
         capture_one "clipboard" "$clipboard_timeout"
         clipboard_status="$CAPTURE_STATUS"
         final_status="$clipboard_status"
@@ -159,6 +186,8 @@ capture_selection() {
             selected_source="clipboard"
             query="$CAPTURE_VALUE"
         fi
+    else
+        final_status="$primary_status"
     fi
 
     # Collapse layout whitespace only; dictionary content is untouched downstream.
@@ -172,7 +201,11 @@ capture_selection() {
 }
 
 if [[ "${1:-}" == "--capture" ]]; then
-    capture_selection
+    capture_source="${2:-selection}"
+    if [[ ! "$capture_source" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+        capture_source="selection"
+    fi
+    capture_selection "$capture_source"
     exit 0
 fi
 
