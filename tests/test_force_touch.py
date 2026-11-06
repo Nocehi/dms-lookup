@@ -178,6 +178,12 @@ class HapticDiscoveryTest(unittest.TestCase):
         self.assertEqual(opened, ["/dev/hidraw1"])
         self.assertEqual(h.report.hex(" "), "f2 53 01 19 6c 02 00 21 2b 06 01 00 16 41 13")
 
+    def test_transport_comes_from_evdev_bustype(self):
+        # python-evdev's DeviceInfo has bustype, not bus (crashed on device).
+        src = WATCHER.read_text(encoding="utf-8")
+        self.assertIn("Haptic(args.strength, dev.info.bustype)", src)
+        self.assertNotIn("info.bus)", src)
+
     def test_usb_keeps_0x53_actuator_and_ignores_bluetooth_node(self):
         self.node("hidraw1", "0005:0000004C:00000324")
         self.node("hidraw2", "0003:000005AC:00000324", bytes([0x85, 0x02, 0x81, 0x02]))

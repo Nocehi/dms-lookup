@@ -67,7 +67,7 @@ BUS_USB, BUS_BLUETOOTH = 0x03, 0x05
 class Haptic:
     """Best effort: any failure just disables the pulse until next rescan.
 
-    bus is the touch device's transport (evdev info.bus): the actuator is
+    bus is the touch device's transport (evdev info.bustype): the actuator is
     looked for on the same transport, so a trackpad that is both plugged in
     and paired never pulses over the link it is not using."""
 
@@ -259,7 +259,7 @@ def main():
         if dev is None:
             time.sleep(2)
             continue
-        haptic = Haptic(args.strength, dev.info.bus)
+        haptic = Haptic(args.strength, dev.info.bustype)
         if args.no_haptic:
             haptic.close()
         log(f"watching {dev.path} {dev.name!r} "
