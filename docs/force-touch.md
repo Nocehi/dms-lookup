@@ -2,7 +2,9 @@
 
 > **Status: experimental dogfood, off by default.** Tested on one Apple Magic
 > Trackpad (A3120, USB-C, `05ac:0324`) over **USB** on CachyOS / niri 26.04 /
-> libinput 1.32. Haptic feedback works over USB only. `packaging/install-user.sh`
+> libinput 1.32. Haptic feedback works over USB and, since 2026-11-06, over
+> Bluetooth (the watcher sends the Bluetooth `0xF2` report when the touch device
+> is on Bluetooth). `packaging/install-user.sh`
 > does not install or enable anything described here, and
 > `packaging/uninstall-user.sh` does not remove it.
 
@@ -46,8 +48,10 @@ systemctl --user enable --now dank-force-press.service
 `--enable` does the last step for you. `--dry-run` on the installer prints what
 it would do. An existing file that differs is kept as `<name>.bak-<timestamp>`.
 
-Haptics (optional, USB only) need write access to the trackpad's actuator
-`hidraw` node. The installer prints the commands; it never runs sudo:
+Haptics (optional) need write access to the trackpad's `hidraw` node: the
+actuator interface over USB, the single node over Bluetooth. The rule covers
+both (`KERNELS=="0005:004C:0324.*"` for Bluetooth, which has no USB
+attributes to match). The installer prints the commands; it never runs sudo:
 
 ```sh
 sudo install -m 644 packaging/udev/70-dank-magic-trackpad-haptic.rules /etc/udev/rules.d/
@@ -56,7 +60,8 @@ sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw
 
 Check: `journalctl --user -u dank-force-press -n 5` should show
 `haptic on /dev/hidrawN`. `not writable` means the rule has not applied yet;
-replug the cable.
+replug the cable, or reconnect over Bluetooth. Bluetooth pulse strength:
+`--bt-strength` (default `0x30`, audible; try `0x18` for a quieter pulse).
 
 ## Tune
 
@@ -80,8 +85,9 @@ sudo rm /etc/udev/rules.d/70-dank-magic-trackpad-haptic.rules && sudo udevadm co
 
 ## Known limits
 
-- One device model, USB only for haptics. Over Bluetooth the lookup should
-  still work but thresholds may need re-measuring; unverified.
+- One device model. Bluetooth haptics verified with `haptic_pulse.py` only;
+  the watcher's Bluetooth path is not yet dogfooded, and pressure thresholds
+  and report rate over Bluetooth have not been re-measured.
 - A resting thumb on the pad counts as a second finger and blocks the deep
   press.
 - Something must already be selected; a click does not select a word.

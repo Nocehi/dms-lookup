@@ -17,7 +17,7 @@ The service is left disabled unless --enable is given.
 An existing file that differs is kept as <name>.bak-<timestamp>.
 
 Experimental: Apple Magic Trackpad 2 / USB-C (05ac:0265, 05ac:0324) only;
-haptic feedback works over USB only. See docs/force-touch.md.
+haptic feedback over USB and Bluetooth (004c:0324). See docs/force-touch.md.
 EOF
 }
 
@@ -126,7 +126,7 @@ if have_systemctl; then
 fi
 
 if [[ ! -e "$UDEV_DEST" ]] || ! cmp -s "$UDEV_RULE" "$UDEV_DEST"; then
-    printf '\nOptional haptic feedback (USB only) needs write access to the trackpad hidraw node:\n'
+    printf '\nOptional haptic feedback (USB or Bluetooth) needs write access to the trackpad hidraw node:\n'
     printf '  sudo install -m 644 %s %s\n' "$UDEV_RULE" "$UDEV_DEST"
     printf '  sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw\n'
 fi
