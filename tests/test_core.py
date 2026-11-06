@@ -1478,5 +1478,78 @@ class DefinitionFormatTests(unittest.TestCase):
         self.assertGreaterEqual(result["timing"]["backend_ms"], 0)
 
 
+class StyleRunTests(unittest.TestCase):
+    """Display styling never changes text and only marks reliable patterns."""
+
+    def styled(self, raw, definition_format="plain", name="Example"):
+        import dank_lookup_core as core
+
+        plain = core.clean_definition(name, raw, definition_format=definition_format)
+        flags = core.style_flags(raw, plain, definition_format=definition_format)
+        runs = core.runs_from_flags(plain, flags)
+        if runs is not None:
+            self.assertEqual("".join(text for text, _ in runs), plain)
+        return plain, runs or []
+
+    def flags_of(self, runs, text):
+        for run_text, flags in runs:
+            if text in run_text:
+                return flags
+        self.fail(f"{text!r} not found in {runs!r}")
+
+    def test_html_bold_and_gray_spans_become_flags(self):
+        raw = ("<b>好</b>\n<br><span color='gray'>音讀：ㄏㄠˇ hǎo</span>"
+               "<ol><li><span color='gray'>[形]</span> 美、善。<br>例：如：「好東西」。</li></ol>")
+        plain, runs = self.styled(raw, "html")
+        self.assertEqual(self.flags_of(runs, "好\n"[0]), "b")
+        self.assertEqual(self.flags_of(runs, "音讀"), "d")
+        self.assertEqual(self.flags_of(runs, " 美、善。"), "")
+        self.assertEqual(self.flags_of(runs, "例：如"), "d")
+
+    def test_html_grammar_class_is_italic_but_cjk_italic_is_dimmed(self):
+        _, runs = self.styled('<font class="grammar" color="green">verb</font> x <i>説文</i>', "html")
+        self.assertEqual(self.flags_of(runs, "verb"), "di")
+        self.assertEqual(self.flags_of(runs, "説文"), "d")
+
+    def test_plain_rules_mark_pronunciation_separators_and_pos(self):
+        _, runs = self.styled("[hao3] good | proper")
+        self.assertEqual(self.flags_of(runs, "[hao3]"), "d")
+        self.assertEqual(self.flags_of(runs, " | "), "d")
+        _, runs = self.styled("vt. to make solid\n2. to unite")
+        self.assertEqual(self.flags_of(runs, "vt."), "di")
+        self.assertEqual(self.flags_of(runs, "2."), "bd")
+
+    def test_bracketed_han_tag_is_not_a_pronunciation_but_still_dimmed(self):
+        _, runs = self.styled("[動詞]\n喜歡")
+        self.assertEqual(self.flags_of(runs, "[動詞]"), "d")
+        self.assertEqual(self.flags_of(runs, "喜歡"), "")
+
+    def test_unstyled_text_returns_no_runs(self):
+        plain, runs = self.styled("love\nfondle")
+        self.assertEqual(runs, [])
+
+    def test_render_entries_attaches_runs_and_keeps_body(self):
+        import dank_lookup_core as core
+
+        rendered, _ = core.render_entries(
+            [{"dict": "CC", "word": "好", "definition": "[hao3] good | proper"}]
+        )
+        entry = rendered["entries"][0]
+        self.assertEqual(entry["body"], "[hao3] good | proper")
+        self.assertEqual("".join(text for text, _ in entry["runs"]), entry["body"])
+
+    def test_truncated_preview_runs_match_preview_text(self):
+        import dank_lookup_core as core
+
+        rendered, _ = core.render_entries(
+            [{"dict": "CC", "word": "x", "definition": "[x1] " + "a | " * 400}],
+            max_entry_chars=100,
+        )
+        entry = rendered["entries"][0]
+        self.assertTrue(entry["truncated"])
+        self.assertEqual("".join(text for text, _ in entry["runs"]), entry["body"])
+        self.assertEqual(entry["runs"][-1][1], "d")
+
+
 if __name__ == "__main__":
     unittest.main()

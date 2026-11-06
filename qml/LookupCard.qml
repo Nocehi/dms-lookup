@@ -494,23 +494,47 @@ Item {
                             id: section
                             required property var modelData
                             width: sectionColumn.width
-                            spacing: root.theme.spacingXS
+                            spacing: root.theme.spacingS
 
-                            Text {
+                            // Dictionary heading with a hairline to the right,
+                            // as in a dictionary page: secondary text, no accent.
+                            Item {
                                 width: parent.width
+                                height: sourceHeading.implicitHeight
                                 visible: section.modelData.source !== ""
-                                text: section.modelData.source
-                                color: root.theme.primary
-                                font.family: root.theme.fontUi
-                                font.pixelSize: root.theme.fontSizeSmall
-                                font.weight: Font.Medium
-                                elide: Text.ElideRight
+
+                                Text {
+                                    id: sourceHeading
+                                    anchors.left: parent.left
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: Math.min(implicitWidth, parent.width)
+                                    text: section.modelData.source
+                                    color: root.theme.on_surface
+                                    opacity: root.theme.textSecondary
+                                    font.family: root.theme.fontUi
+                                    font.pixelSize: root.theme.fontSizeMedium
+                                    font.weight: Font.Medium
+                                    elide: Text.ElideRight
+                                }
+
+                                Rectangle {
+                                    anchors.left: sourceHeading.right
+                                    anchors.leftMargin: root.theme.spacingM
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    height: root.theme.borderWidth
+                                    color: root.theme.dividerColor
+                                }
                             }
 
                             Text {
                                 width: parent.width
-                                text: section.modelData.text
-                                textFormat: Text.PlainText
+                                textFormat: section.modelData.styled ? Text.StyledText
+                                                                     : Text.PlainText
+                                text: section.modelData.styled
+                                      ? root.controller.styledMarkup(section.modelData.lines,
+                                                                     root.theme.styledDimColor)
+                                      : section.modelData.text
                                 color: root.theme.on_surface
                                 font.family: root.theme.fontUi
                                 font.pixelSize: root.theme.fontSizeMedium

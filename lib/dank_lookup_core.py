@@ -208,6 +208,204 @@ def clean_definition(
     return _normalise_definition_text(dictionary_name, text)
 
 
+# ---- Display styling ---------------------------------------------------------
+# The card can show light typographic hierarchy (bold, italic, dimmed text) the
+# way a dictionary page does. Styling is advisory: it never changes the text.
+# ``style_runs`` returns runs whose concatenated text is exactly the plain
+# body, so Copy/Open and every plain-text consumer are unaffected. Flags are
+# "b" (bold), "i" (italic) and "d" (dimmed/secondary).
+
+_STYLE_BOLD_TAGS = frozenset({"b", "strong", "hw", "r"})
+_STYLE_ITALIC_TAGS = frozenset({"i", "em"})
+_STYLE_DIM_TAGS = frozenset({"rt", "rp", "sup", "sub", "py", "gu"})
+_STYLE_MAX_ALIGN_CHARS = 20000
+
+
+class _StyledTextParser(_PlainTextParser):
+    """Mirror of _PlainTextParser that also records a flag set per part."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.flags: list[frozenset[str]] = []
+        self._stack: list[tuple[str, frozenset[str]]] = []
+
+    def _current(self) -> frozenset[str]:
+        return self._stack[-1][1] if self._stack else frozenset()
+
+    def _emit(self, text: str, flags: frozenset[str]) -> None:
+        self.parts.append(text)
+        self.flags.append(flags)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        name = tag.casefold()
+        if name in self._BLOCK_TAGS:
+            self._emit("\n", frozenset())
+        if name == "li":
+            self._emit("• ", frozenset({"d"}))
+        if name in self._BLOCK_TAGS and name not in {"p", "div", "li", "section"}:
+            return
+        added: set[str] = set()
+        if name in _STYLE_BOLD_TAGS:
+            added.add("b")
+        if name in _STYLE_ITALIC_TAGS:
+            added.add("i")
+        if name in _STYLE_DIM_TAGS:
+            added.add("d")
+        values = {key.casefold(): (value or "").casefold() for key, value in attrs}
+        if values.get("color") or "color:" in values.get("style", ""):
+            added.add("d")
+        if values.get("class") == "grammar":
+            added.update({"i", "d"})
+        self._stack.append((name, self._current() | added))
+
+    def handle_endtag(self, tag: str) -> None:
+        name = tag.casefold()
+        if name in self._BLOCK_TAGS:
+            self._emit("\n", frozenset())
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == name:
+                del self._stack[index:]
+                break
+
+    def handle_data(self, data: str) -> None:
+        self._emit(data, self._current())
+
+    def handle_entityref(self, name: str) -> None:
+        self._emit(html.unescape(f"&{name};"), self._current())
+
+    def handle_charref(self, name: str) -> None:
+        self._emit(html.unescape(f"&#{name};"), self._current())
+
+
+def _html_flags(raw: str, plain: str) -> list[set[str]] | None:
+    """Per-character flags of ``plain`` taken from the HTML markup."""
+
+    if len(raw) > _STYLE_MAX_ALIGN_CHARS:
+        return None
+    parser = _StyledTextParser()
+    try:
+        parser.feed(raw)
+        parser.close()
+    except Exception:
+        return None
+    source_chars: list[str] = []
+    source_flags: list[frozenset[str]] = []
+    for text, flags in zip(parser.parts, parser.flags):
+        source_chars.extend(text)
+        source_flags.extend([flags] * len(text))
+    source = "".join(source_chars)
+    result: list[set[str]] = [set() for _ in plain]
+    # Fast path: the cleaned text usually differs from the parser output only
+    # by surrounding whitespace.
+    lead = len(source) - len(source.lstrip())
+    if source.strip() == plain:
+        for index in range(len(plain)):
+            result[index].update(source_flags[lead + index])
+        return result
+    # Cleaning only deletes characters (control characters, trailing spaces,
+    # surplus blank lines), so plain is normally a subsequence of source and a
+    # linear walk aligns them. Anything else falls back to difflib.
+    cursor = 0
+    for index, char in enumerate(plain):
+        found = source.find(char, cursor)
+        if found < 0 or found - cursor > 64:
+            break
+        result[index].update(source_flags[found])
+        cursor = found + 1
+    else:
+        return result
+    result = [set() for _ in plain]
+    import difflib  # rare fallback; kept off the one-shot import path
+
+    matcher = difflib.SequenceMatcher(None, source, plain, autojunk=False)
+    for tag, a0, a1, b0, b1 in matcher.get_opcodes():
+        if tag != "equal":
+            continue
+        for offset in range(a1 - a0):
+            result[b0 + offset].update(source_flags[a0 + offset])
+    return result
+
+
+_HAN = re.compile(r"[㐀-鿿]")
+# Line-level rules for plain-text sources. Each pattern names the span to
+# style; none of them changes text.
+_LINE_RULES: list[tuple[re.Pattern[str], str]] = [
+    # Sense numbers: "1. ", "2) ", "1 ▶ ", "(3) ", circled numbers.
+    (re.compile(r"^\s*(\(?\d{1,3}[.)]?(?=\s)|[①-⑳❶-❿])"), "bd"),
+    # Romanisation/pronunciation in square brackets at line start: [hao3].
+    (re.compile(r"^\s*(\[[^\]\n㐀-鿿]{1,60}\])"), "d"),
+    # Part-of-speech tags in brackets with Han text: [形], [動詞].
+    (re.compile(r"^\s*(\[[㐀-鿿]{1,6}\])"), "d"),
+    # Latin part-of-speech abbreviations at line start or after a sense marker.
+    (re.compile(r"^(?:\s*\d{1,3}\s*▶\s*|\s*)((?:vt|vi|v|n|adj|adv|int|prep|conj|pron|abbr|aux|num|art|pref|prefix|suffix)\.(?:\s*[a-z]+\.)*)(?=\s|$)"), "id"),
+    # Example / quotation / note lines (Chinese dictionaries).
+    (re.compile(r"^\s*((?:例|引|如|英|註|注|參見|見)：.*)$"), "d"),
+    (re.compile(r"^\s*((?:部首|總筆畫|筆畫|部外筆畫)：.*)$"), "d"),
+    # words.hk example: sentence followed by a jyutping gloss in parentheses.
+    (re.compile(r"^(.+\s\((?:[a-z]+[1-6][ ,.!?;:'\-]*)+[^()\n]*\))$"), "d"),
+    # GCIDE quotation attribution lines ("--T. Burnet.").
+    (re.compile(r"^(\s+.*--\s?[A-Z][^\n]*)$"), "id"),
+]
+_INLINE_RULES: list[tuple[re.Pattern[str], str]] = [
+    # IPA between slashes, GCIDE pronunciation between backslashes.
+    (re.compile(r"(/[^/\n㐀-鿿]{1,60}/)"), "d"),
+    (re.compile(r"(\\[^\\\n]{1,60}\\)"), "d"),
+    # GCIDE etymology/inflection brackets.
+    (re.compile(r"(\[(?:Etym|imp\.|p\. p\.|pl\.|R\.)[^\]\n]{0,200}\])"), "d"),
+    # Sense separators in CC-CEDICT and JMdict, JMdict arrows and markers.
+    (re.compile(r"(\s[|¦]\s)"), "d"),
+    (re.compile(r"(→|█|▊|▶)"), "d"),
+]
+
+
+def _rule_flags(plain: str, flags: list[set[str]]) -> None:
+    start = 0
+    for line in plain.split("\n"):
+        for pattern, styles in _LINE_RULES:
+            match = pattern.search(line)
+            if match:
+                italic_ok = not _HAN.search(match.group(1))
+                for index in range(start + match.start(1), start + match.end(1)):
+                    flags[index].update(s for s in styles if s != "i" or italic_ok)
+        for pattern, styles in _INLINE_RULES:
+            for match in pattern.finditer(line):
+                for index in range(start + match.start(1), start + match.end(1)):
+                    flags[index].update(styles)
+        start += len(line) + 1
+
+
+def style_flags(raw: str, plain: str, *, definition_format: str = "plain") -> list[set[str]]:
+    flags: list[set[str]] | None = None
+    if definition_format == "html":
+        flags = _html_flags(raw, plain)
+    if flags is None:
+        flags = [set() for _ in plain]
+    _rule_flags(plain, flags)
+    # Italic CJK reads badly; show it dimmed instead.
+    for index, char in enumerate(plain):
+        if "i" in flags[index] and _HAN.match(char):
+            flags[index].discard("i")
+            flags[index].add("d")
+    return flags
+
+
+def runs_from_flags(text: str, flags: list[set[str]]) -> list[list[str]] | None:
+    """Group ``text`` into [text, flags] runs; None when nothing is styled."""
+
+    runs: list[list[str]] = []
+    styled = False
+    for index, char in enumerate(text):
+        key = "".join(sorted(flags[index])) if index < len(flags) else ""
+        if char == "\n":
+            key = ""
+        styled = styled or key != ""
+        if runs and runs[-1][1] == key:
+            runs[-1][0] += char
+        else:
+            runs.append([char, key])
+    return runs if styled else None
+
+
 def _configured_data_directories(
     source: Mapping[str, Any], config: Mapping[str, Any]
 ) -> list[pathlib.Path]:
@@ -968,6 +1166,8 @@ def _prepare_entries(
                 "source": source,
                 "full_body": cleaned,
                 "raw_ref": identifier,
+                "_raw": raw,
+                "_definition_format": definition_format,
             }
         )
         if retain_entry_vault:
@@ -1013,6 +1213,13 @@ def render_entries(
         if entry_truncated:
             preview = full[:max_entry_chars].rstrip() + "\n" + TRUNCATION_MARKER
         section = _section(entry, preview)
+        flags = style_flags(
+            entry["_raw"], full, definition_format=entry["_definition_format"]
+        )
+        if entry_truncated:
+            kept = len(preview) - len(TRUNCATION_MARKER) - 1
+            flags = flags[:kept] + [set()] + [{"d"}] * len(TRUNCATION_MARKER)
+        runs = runs_from_flags(preview, flags)
         if preview_parts and preview_total + 2 + len(section) > max_body_chars:
             overall_truncated = True
             continue
@@ -1033,6 +1240,8 @@ def render_entries(
                 "raw_ref": entry["raw_ref"],
             }
         )
+        if runs is not None:
+            public_entries[-1]["runs"] = runs
     if overall_truncated and preview_parts and not preview_parts[-1].endswith(TRUNCATION_MARKER):
         marker = TRUNCATION_MARKER
         if preview_total + 1 + len(marker) <= max_body_chars:

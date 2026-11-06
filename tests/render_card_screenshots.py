@@ -96,7 +96,7 @@ def slim(result):
     """
 
     def entry(value):
-        return {key: value.get(key) for key in ("word", "source", "body") if key in value}
+        return {key: value.get(key) for key in ("word", "source", "body", "runs") if key in value}
 
     def mode_body(body):
         kept = {key: item for key, item in body.items() if key not in {"entries", "full_body"}}
