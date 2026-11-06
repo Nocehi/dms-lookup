@@ -101,6 +101,8 @@ sudo rm /etc/udev/rules.d/70-dank-magic-trackpad-haptic.rules && sudo udevadm co
 - [`force-touch/notes.md`](force-touch/notes.md): tests, measurements, existing
   solutions, kernel history, roadmap (Chinese).
 - [`force-touch/force-event-bus-design.md`](force-touch/force-event-bus-design.md):
-  planned force event bus with Dank Lookup and DMS as consumers (Chinese).
+  planned force event bus with Dank Lookup, DMS and app adapters as consumers (Chinese).
+- [`force-touch/a3120-review.md`](force-touch/a3120-review.md): review of the bus
+  design against Magic Trackpad A3120 driver and libinput behaviour (Chinese).
 - [`force-touch/apple-force-touch-survey.md`](force-touch/apple-force-touch-survey.md):
   how Apple uses Force Touch and what carries over to niri/DMS (Chinese).

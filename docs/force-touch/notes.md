@@ -332,7 +332,8 @@ SUBSYSTEM=="hidraw", IMPORT{parent}="HID_NAME", ENV{HID_NAME}=="Apple MTP actuat
 | `tools/force-touch/area_probe.py` | 壓力與接觸面積取樣（Firm Press 評估，已放棄） |
 | `tools/force-touch/haptic_pulse.py` | 觸覺實驗，USB／藍牙皆認（按產品 ID），預設只列出節點，`--fire` 才發送 |
 | `docs/force-touch/bluetooth-haptics-test.md` | A3120 藍牙觸覺測試步驟（含 udev 與回報率量測） |
-| `docs/force-touch/force-event-bus-design.md` | force 事件匯流設計：傳輸方式、事件格式、認領規則、遷移步驟、資料偵測 |
+| `docs/force-touch/force-event-bus-design.md` | force 事件匯流設計：傳輸方式、事件格式、認領規則、遷移步驟、資料偵測、本機程式消費者 |
+| `docs/force-touch/a3120-review.md` | 匯流設計的 A3120 面向審閱：邏輯按鍵、時鐘、解析度、選取擷取時機、觸覺與換線 |
 | `docs/force-touch/apple-force-touch-survey.md` | Apple Force Touch 用途與 API 調查；第五、六節為其他平台、社區專案與 niri/DMS 點子 |
 
 量測原始數據（`margin-probe/`、`area-probe/` 的 CSV 與圖）及第一版原型 `force_press_watch.py` 未納入 repo，仍存於專案筆記資料夾。
