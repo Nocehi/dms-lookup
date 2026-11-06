@@ -15,7 +15,7 @@ The defaults reproduce a DMS 2.0 popout at `radiusStrength` 75 and `fontScale`
 |---|---|---|
 | Radius | `radiusSmall`, `cornerRadius`, `windowRadius`, `radiusFull` | 12, 18, 24, pill |
 | Spacing | `spacingXXS` … `spacingXL`; `popoutPadding`, `gap` | 2, 4, 8, 12, 16, 24; 16, 12 |
-| Surface | `surfaceOpacity`, `outlineOpacity`, `borderWidth` | 0.9 of `surface`, 0.35 of `outline`, 1 px |
+| Surface | `surfaceOpacity`, `outlineOpacity`, `borderWidth`, `backgroundBlur` | 0.9 of `surface`, 0.35 of `outline`, 1 px, on |
 | Elevation | `shadowOffsetY`, `shadowBlur`, `shadowAlpha` | level 2: 0 4 px 8 px, alpha 0.125 |
 | Type | `fontSizeSmall` … `fontSizeXXLarge` | 12, 15, 17, 21, 29 |
 | Fonts | `fontHeading`, `fontHeadingCjk`, `fontUi`, `fontMono` | Asebi Mincho, Jigmo, MiSans TC, Sarasa Mono HC |
@@ -28,11 +28,18 @@ text uses Asebi Mincho. Sarasa Mono HC and MiSans TC give Hong Kong/Traditional
 glyph forms. The elevation shadow uses `QtQuick.Effects.RectangularShadow`
 (Qt 6.9 or newer).
 
+The surface is only 0.9 opaque, so the card asks the compositor to blur what is
+behind it (`BackgroundEffect.blurRegion`, ext-background-effect-v1), as DMS
+popouts do. A compositor without that protocol ignores the request and the
+window behind shows through faintly. The 0.35 outline border matches the
+border DMS draws on blurred surfaces (`blurBorderEnabled`, default opacity 0.35).
+
 ## Palette
 
 Colours are matugen role names: `primary`, `on_primary`, `surface`,
 `surface_container_high`, `on_surface`, `outline` (required in a generated
-file) and `error`, `on_error` (optional; each falls back separately). Built-in
+file) and `error`, `on_error`, `secondary_container`, `on_secondary_container`
+(optional; each falls back separately). Built-in
 light and dark fallbacks are the `fallbackPalettes` table in the token file.
 
 Sources, in order of precedence:
