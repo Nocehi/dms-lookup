@@ -169,6 +169,17 @@ QtObject {
         return fallback
     }
 
+    // "#AARRGGBB" for markup (StyledText <font color>), which takes a string.
+    function colorString(color, amount) {
+        function hex(value) {
+            var text = Math.round(Math.max(0, Math.min(1, value)) * 255).toString(16)
+            return text.length < 2 ? "0" + text : text
+        }
+        return "#" + hex(amount) + hex(color.r) + hex(color.g) + hex(color.b)
+    }
+
+    readonly property string styledDimColor: colorString(on_surface, textSecondary)
+
     function withAlpha(color, amount) {
         return Qt.rgba(color.r, color.g, color.b, amount)
     }

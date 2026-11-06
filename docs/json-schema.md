@@ -119,7 +119,14 @@ Each exact/related mode result contains:
 | `preview_entry_count` | integer | Entries represented in the bounded preview. |
 
 An entry record includes `entry_id`, `raw_ref`, `word`, `source`, bounded `body`,
-and `truncated`. The private vault used by opt-in retention stores one canonical
+and `truncated`, and optionally `runs`: display styling for `body` as
+`[text, flags]` pairs whose texts concatenate to exactly `body`. Flags are a
+string of `b` (bold), `i` (italic) and `d` (dimmed/secondary), empty for plain
+text. Styling comes from the bold, italic and coloured spans of HTML sources and
+from conservative line rules (sense numbers, bracketed readings and
+part-of-speech tags, example and citation lines, sense separators). It never
+changes text; `runs` is omitted when nothing is styled, and consumers that
+ignore it lose nothing. The private vault used by opt-in retention stores one canonical
 cleaned body per retained entry; it does not duplicate the unmodified backend
 definition. For an inline result, **Open full** sends the
 active exact/related/token `full_body` over stdin to `open-text`. For an
