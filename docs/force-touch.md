@@ -84,9 +84,9 @@ sudo rm /etc/udev/rules.d/70-dank-magic-trackpad-haptic.rules && sudo udevadm co
 
 ## Known limits
 
-- One device model. Bluetooth haptics verified with `haptic_pulse.py` only;
-  the watcher's Bluetooth path is not yet dogfooded, and pressure thresholds
-  and report rate over Bluetooth have not been re-measured.
+- One device model. Bluetooth haptics verified on the device (2026-11-06:
+  deep press over Bluetooth vibrates and the udev rule grants access), but
+  pressure thresholds and report rate over Bluetooth have not been re-measured.
 - A resting thumb on the pad counts as a second finger and blocks the deep
   press.
 - Something must already be selected; a click does not select a word.
