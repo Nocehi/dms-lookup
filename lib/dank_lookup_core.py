@@ -25,6 +25,7 @@ import unicodedata
 import uuid
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from dank_lookup_detectors import detect as detect_data
 from dank_lookup_sdcv_stdin import (
     DEFAULT_STDOUT_CAP_BYTES,
     MAIN_PROMPT,
@@ -1869,7 +1870,15 @@ def lookup(
         "error": None,
         "query_truncated": query_too_long,
         "config": config_meta,
+        "detections": [],
     }
+    detector_warning = None
+    if query and not query_too_long:
+        # Pure local computation on the query; never fatal to the lookup.
+        try:
+            base["detections"] = detect_data(query, config)
+        except Exception:  # noqa: BLE001 - a detector bug must not hide definitions
+            detector_warning = "detector_error"
     empty_modes = {
         "candidate_modes": candidate_modes(config, features),
         "installed_modes": [],
@@ -1922,6 +1931,8 @@ def lookup(
         if close_warning:
             base["warnings"] = sorted(set(base.get("warnings", [])) | {close_warning})
 
+    if detector_warning:
+        base["warnings"] = sorted(set(base.get("warnings", [])) | {detector_warning})
     default_mode = base.get("default_mode")
     default_result = base.get("results_by_mode", {}).get(default_mode, {}) if default_mode else {}
     base["subtitle"] = default_result.get("subtitle", "")

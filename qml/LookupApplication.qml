@@ -78,10 +78,15 @@ Item {
             process.running = true
     }
 
-    function copyActiveBody() {
-        startStdinProcess(stdinProcess, controller.activeBody(),
+    function copyText(text) {
+        startStdinProcess(stdinProcess, String(text || ""),
                           [Quickshell.env("DANK_LOOKUP_WL_COPY") || "wl-copy",
                            "--type", "text/plain;charset=utf-8"])
+    }
+
+    // For a local detection this is the detected value (e.g. the ISO date).
+    function copyActiveBody() {
+        copyText(controller.activeCopyText(0))
     }
 
     function openActiveFullBody() {
@@ -141,6 +146,7 @@ Item {
 
                 onCloseRequested: popup.visible = false
                 onCopyRequested: root.copyActiveBody()
+                onCopyTextRequested: function(text) { root.copyText(text) }
                 onOpenFullRequested: root.openActiveFullBody()
             }
         }

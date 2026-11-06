@@ -129,5 +129,20 @@
   "fallback": {
     "mock": false,
     "unfiltered": false
+  },
+  "detectors": {
+    "enabled": true,
+    "kinds": {
+      "url": true,
+      "email": true,
+      "color": true,
+      "number_base": true,
+      "timestamp": true,
+      "date": true,
+      "unit": true
+    },
+    "calendars": ["roc", "japanese", "ganzhi", "iso_week"],
+    "date_order": "auto",
+    "max_query_chars": 200
   }
 }

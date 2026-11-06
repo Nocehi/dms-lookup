@@ -2,6 +2,12 @@
 
 ## Unreleased — standalone-first 0.8.0
 
+- Add local data detectors (`lib/dank_lookup_detectors.py`): when the whole
+  selection is a date, timestamp, URL, e-mail, unit quantity, colour or
+  prefixed integer, the result carries an optional `detections` array and the
+  card shows a **Local detection** chip with a Copy per detected value.
+  Calendars: 民國, 和曆, 干支, ISO week. Pure stdlib computation, enforced by an
+  import-boundary test; configurable under `detectors` in `config.json`.
 - Add an experimental, opt-in Magic Trackpad force-press trigger
   (`bin/dank-force-press-watch`, `systemd/dank-force-press.service`,
   `packaging/install-force-touch.sh`, haptic udev rule). Not installed or

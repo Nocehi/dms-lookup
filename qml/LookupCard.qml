@@ -12,6 +12,7 @@ Item {
 
     signal closeRequested
     signal copyRequested
+    signal copyTextRequested(string text)
     signal openFullRequested
 
     function alpha(color, amount) {
@@ -328,7 +329,9 @@ Item {
                 // the source of an unlabeled (flat) body.
                 text: {
                     var pieces = []
-                    if (root.controller.showRelated)
+                    if (root.controller.activeIsDetection())
+                        pieces.push(root.ui("Local detection", "本機偵測"))
+                    else if (root.controller.showRelated)
                         pieces.push(root.ui("Related results", "相關結果"))
                     var sections = root.controller.activeDisplay.sections
                     var source = root.controller.activeSubtitle()
@@ -469,6 +472,22 @@ Item {
                 font.pixelSize: root.theme.fontSizeMedium
                 wrapMode: Text.WordWrap
                 horizontalAlignment: Text.AlignHCenter
+            }
+
+            Rectangle {
+                id: detectionSwatch
+                anchors.top: parent.top
+                anchors.right: parent.right
+                width: root.theme.controlHeight
+                height: root.theme.controlHeight
+                visible: root.controller.phase === "ready"
+                         && root.controller.activeSwatch() !== ""
+                // Data, not design: the detected colour itself is the content.
+                color: visible ? root.controller.activeSwatch() : "transparent"
+                radius: root.theme.radiusSmall
+                border.color: root.theme.borderColor
+                border.width: root.theme.borderWidth
+                z: 1
             }
 
             Flickable {
@@ -625,12 +644,22 @@ Item {
                 // container) button, as in DMS. Pill shape: DMS buttons up to
                 // 40 px use corner "m", which is a full pill at this height.
                 Repeater {
-                    model: ["copy", "open"]
+                    // A detection offers one Copy per detected value and no
+                    // Open full; dictionary results keep Copy + Open full.
+                    model: {
+                        if (!root.controller.activeIsDetection())
+                            return ["copy", "open"]
+                        var choices = root.controller.activeCopyChoices()
+                        if (choices.length <= 1)
+                            return ["copy"]
+                        return choices.map(function(choice, i) { return "copy:" + i })
+                    }
 
                     T.Button {
                         id: actionButton
                         required property string modelData
                         property bool tonal: modelData === "open"
+                        required property int index
                         implicitWidth: Math.max(root.theme.minControlWidth,
                                                 actionText.implicitWidth
                                                 + 2 * root.theme.spacingL)
@@ -639,8 +668,15 @@ Item {
 
                         contentItem: Text {
                             id: actionText
-                            text: actionButton.tonal ? root.ui("Open full", "完整條目")
-                                                     : root.ui("Copy", "複製")
+                            text: {
+                                if (actionButton.tonal)
+                                    return root.ui("Open full", "完整條目")
+                                var copy = root.ui("Copy", "複製")
+                                if (actionButton.modelData.indexOf("copy:") !== 0)
+                                    return copy
+                                var choice = root.controller.activeCopyChoices()[actionButton.index]
+                                return choice ? copy + " " + choice.label : copy
+                            }
                             color: actionButton.tonal ? root.theme.on_secondary_container
                                                       : root.theme.primary
                             font.family: root.theme.fontUi
@@ -666,8 +702,15 @@ Item {
                             }
                         }
 
-                        onClicked: actionButton.tonal ? root.openFullRequested()
-                                                      : root.copyRequested()
+                        onClicked: {
+                            if (root.controller.activeIsDetection())
+                                root.copyTextRequested(
+                                    root.controller.activeCopyText(actionButton.index))
+                            else if (actionButton.tonal)
+                                root.openFullRequested()
+                            else
+                                root.copyRequested()
+                        }
                     }
                 }
             }

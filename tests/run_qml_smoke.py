@@ -859,6 +859,47 @@ def run_smoke(timeout: float) -> None:
             require(error.get("error") == "Readable structured smoke error",
                     f"structured error message was not rendered: {error}")
 
+            # Local detection: no dictionary hit, so the detection chip is the
+            # default view; Copy sends the detected value, not the preview.
+            detect_id = frontend.call("prepare", "selection")
+            detect_sequence = int(frontend.status().get("sequence", -1))
+            detect_payload = {
+                "request_id": detect_id,
+                "sequence": detect_sequence,
+                "query": "https://例子.tw/?utm_source=x",
+                "results_by_mode": {},
+                "available_modes": [],
+                "default_mode": None,
+                "error": {"code": "sdcv_missing", "message": "Install sdcv"},
+                "detections": [{
+                    "kind": "url",
+                    "label": "網址",
+                    "lines": ["主機：例子.tw", "Punycode：xn--fsqu00a.tw"],
+                    "copy": [
+                        {"label": "網址", "value": "https://例子.tw/?utm_source=x"},
+                        {"label": "去追蹤參數", "value": "https://例子.tw/"},
+                    ],
+                }],
+            }
+            require(frontend.call(
+                "mockResult", json.dumps(detect_payload, ensure_ascii=False,
+                                         separators=(",", ":"))
+            ) == "ok", "detection mock was rejected")
+            detected = parse_object(frontend.action("snapshot"), "detection snapshot")
+            require(detected.get("phase") == "ready" and detected.get("mode") == "detect",
+                    f"detection did not become the default view: {detected}")
+            require(detected.get("body") == "主機：例子.tw\nPunycode：xn--fsqu00a.tw",
+                    f"detection body is wrong: {detected}")
+            detection_meta = parse_object(frontend.action("detections"), "detection meta")
+            require(detection_meta.get("active") is True
+                    and detection_meta.get("copy_labels") == ["網址", "去追蹤參數"],
+                    f"detection copy choices are wrong: {detection_meta}")
+            require(frontend.action("copy-payload", "1") == "https://例子.tw/",
+                    "second detection copy value was not selected")
+            copy_capture.unlink(missing_ok=True)
+            require(frontend.action("copy") == "started", "detection Copy did not start")
+            wait_text(copy_capture, "https://例子.tw/?utm_source=x", timeout)
+
             timing_id = frontend.call("prepare", "benchmark")
             require(frontend.call(
                 "capturePrepared", timing_id, "benchmark"

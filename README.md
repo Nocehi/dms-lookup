@@ -26,6 +26,8 @@ the same shared controller/card.
   unavailable when its dictionaries are absent.
 - Dictionary data is never bundled or downloaded. Unknown/unverified licenses
   are not treated as redistribution permission.
+- Local data detectors (date, timestamp, URL, e-mail, unit, colour, number
+  base) are pure computation on the query: no fetch, no process, no file.
 
 ## Request path
 
@@ -156,6 +158,13 @@ does not pretend to be complete Chinese or Japanese language identification.
 - query/mode/related/token changes reset scroll predictably;
 - 170 ms nonblocking appearance animation; results may update during it;
 - Copy sends the active preview to `wl-copy` over stdin;
+- when the whole selection is a date, timestamp, URL, e-mail address, unit
+  quantity, colour code or `0x`/`0o`/`0b` integer, a **Local detection** chip
+  shows a local preview (calendar conversions incl. 民國/和曆/干支/ISO week,
+  local time, IDN/punycode and tracking parameters, unit conversion incl.
+  regional 斤 and 坪, colour swatch). It is the default view only when no
+  dictionary has an exact result; Copy sends the detected value. Disable with
+  `"detectors": {"enabled": false}` or per kind under `detectors.kinds`;
 - Open full sends a bounded inline exact/related/token body through stdin, or
   sends the query through bounded stdin to re-fetch an oversized body by its
   opaque hash; only that explicit action creates a TTL-cleaned private file,

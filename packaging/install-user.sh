@@ -81,6 +81,7 @@ required_sources=(
     lib/dank_lookup_core.py
     lib/dank_lookup_runtime.py
     lib/dank_lookup_sdcv_stdin.py
+    lib/dank_lookup_detectors.py
     lib/backends/sdcv.sh
     lib/backends/sdcv.py
     lib/backends/mock.sh
@@ -303,6 +304,8 @@ install_managed 644 "$REPO_ROOT/lib/dank_lookup_core.py" app_lib dank_lookup_cor
 install_managed 644 "$REPO_ROOT/lib/dank_lookup_runtime.py" app_lib dank_lookup_runtime.py
 install_managed 644 "$REPO_ROOT/lib/dank_lookup_sdcv_stdin.py" \
     app_lib dank_lookup_sdcv_stdin.py
+install_managed 644 "$REPO_ROOT/lib/dank_lookup_detectors.py" \
+    app_lib dank_lookup_detectors.py
 install_managed 755 "$REPO_ROOT/lib/backends/sdcv.sh" app_lib backends/sdcv.sh
 install_managed 644 "$REPO_ROOT/lib/backends/sdcv.py" app_lib backends/sdcv.py
 install_managed 755 "$REPO_ROOT/lib/backends/mock.sh" app_lib backends/mock.sh

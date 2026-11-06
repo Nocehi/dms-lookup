@@ -246,6 +246,7 @@ PY
         "$fake_home/.local/lib/dank-lookup/dank_lookup_core.py"
         "$fake_home/.local/lib/dank-lookup/dank_lookup_runtime.py"
         "$fake_home/.local/lib/dank-lookup/dank_lookup_sdcv_stdin.py"
+        "$fake_home/.local/lib/dank-lookup/dank_lookup_detectors.py"
         "$fake_home/.local/lib/dank-lookup/backends/sdcv.py"
         "$fake_home/.local/lib/dank-lookup/backends/mock.py"
         "$fake_home/.local/lib/dank-lookup/language-packs/manifest.json"
