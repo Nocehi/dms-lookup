@@ -144,7 +144,11 @@ QtObject {
     // monospace uses Sarasa Mono HC for Hong Kong glyph forms.
     readonly property string fontHeading: "Asebi Mincho"
     readonly property string fontHeadingCjk: "Jigmo"
-    readonly property string fontUi: "MiSans TC"
+    // The variable MiSans TC (DMS's UI font here) comes first: the static
+    // "MiSans TC" install has no Regular face, so fontconfig hands Qt the
+    // Medium file and every line of body text renders a weight too heavy.
+    readonly property var fontUiCandidates: ["Misans TC VF", "MiSans TC VF", "MiSans TC"]
+    readonly property string fontUi: firstInstalled(fontUiCandidates)
     readonly property string fontMono: "Sarasa Mono HC"
 
     // ---- Window and motion ---------------------------------------------------
@@ -183,6 +187,15 @@ QtObject {
         if (isHexColor(candidate))
             return String(candidate).trim()
         return fallbackPalettes[dark ? "dark" : "light"][key]
+    }
+
+    function firstInstalled(families) {
+        var installed = Qt.fontFamilies()
+        for (var i = 0; i < families.length; ++i) {
+            if (installed.indexOf(families[i]) >= 0)
+                return families[i]
+        }
+        return families[families.length - 1]
     }
 
     function headingFamily(text, overrideFamily) {

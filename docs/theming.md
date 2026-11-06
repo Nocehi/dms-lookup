@@ -18,7 +18,7 @@ The defaults reproduce a DMS 2.0 popout at `radiusStrength` 75 and `fontScale`
 | Surface | `surfaceOpacity`, `outlineOpacity`, `borderWidth`, `backgroundBlur` | 0.9 of `surface`, 0.35 of `outline`, 1 px, on |
 | Elevation | `shadowOffsetY`, `shadowBlur`, `shadowAlpha` | level 2: 0 4 px 8 px, alpha 0.125 |
 | Type | `fontSizeSmall` … `fontSizeXXLarge` | 12, 15, 17, 21, 29 |
-| Fonts | `fontHeading`, `fontHeadingCjk`, `fontUi`, `fontMono` | Asebi Mincho, Jigmo, MiSans TC, Sarasa Mono HC |
+| Fonts | `fontHeading`, `fontHeadingCjk`, `fontUi`, `fontMono` | Asebi Mincho, Jigmo, Misans TC VF (else MiSans TC), Sarasa Mono HC |
 
 CJK headwords use Jigmo: Asebi Mincho maps about 3,000 URO code points (騞, 謋 …)
 to empty glyphs and Qt does not fall back from a glyph the primary font
