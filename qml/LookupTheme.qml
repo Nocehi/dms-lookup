@@ -152,7 +152,8 @@ QtObject {
     readonly property string fontMono: "Sarasa Mono HC"
 
     // ---- Window and motion ---------------------------------------------------
-    readonly property real windowWidth: 620
+    // About 34 CJK characters per body line at fontSizeMedium.
+    readonly property real windowWidth: 560
     readonly property real windowHeight: 460
     readonly property real windowMinWidth: 440
     readonly property real windowMinHeight: 280
@@ -167,6 +168,17 @@ QtObject {
             return host[name]
         return fallback
     }
+
+    // "#AARRGGBB" for markup (StyledText <font color>), which takes a string.
+    function colorString(color, amount) {
+        function hex(value) {
+            var text = Math.round(Math.max(0, Math.min(1, value)) * 255).toString(16)
+            return text.length < 2 ? "0" + text : text
+        }
+        return "#" + hex(amount) + hex(color.r) + hex(color.g) + hex(color.b)
+    }
+
+    readonly property string styledDimColor: colorString(on_surface, textSecondary)
 
     function withAlpha(color, amount) {
         return Qt.rgba(color.r, color.g, color.b, amount)

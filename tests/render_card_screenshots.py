@@ -89,13 +89,23 @@ ShellRoot {
 
 
 def slim(result):
-    """Drop fields the card never draws; large mock IPC payloads stall."""
+    """Drop fields the card never draws; large mock IPC payloads stall.
+
+    Entries stay (the card draws them as sections), trimmed to the fields the
+    card reads; their bodies are already bounded previews.
+    """
+
+    def entry(value):
+        return {key: value.get(key) for key in ("word", "source", "body", "runs") if key in value}
+
+    def mode_body(body):
+        kept = {key: item for key, item in body.items() if key not in {"entries", "full_body"}}
+        if body.get("entries"):
+            kept["entries"] = [entry(item) for item in body["entries"]]
+        return kept
 
     def mode_map(value):
-        return {
-            mode: {key: item for key, item in body.items() if key not in {"entries", "full_body"}}
-            for mode, body in (value or {}).items()
-        }
+        return {mode: mode_body(body) for mode, body in (value or {}).items()}
 
     result = dict(result)
     for key in ("results_by_mode", "related_by_mode"):

@@ -647,6 +647,139 @@ Item {
         return resultBody(activeResult())
     }
 
+    // ---- Display shaping ------------------------------------------------------
+    // The card shows each entry under its own source label instead of the flat
+    // body (which stays the copy/open payload). Headword echo lines (the word
+    // repeated by the renderer and again by many dictionaries) are dropped, and
+    // a leading pronunciation line of the first entry moves under the title.
+    readonly property var pronunciationPattern:
+        /^(?:音讀|讀音|注音|拼音|粵拼|粵音|发音|發音)\s*[：:]\s*(.+)$|^([\/\[][^\/\[\]]{1,60}[\/\]])$/
+
+    // Lines are {text, runs}; runs are the backend's [text, flags] style runs
+    // ("b" bold, "i" italic, "d" dimmed). A body without runs is one plain run
+    // per line.
+    function entryLines(entry) {
+        var runs = Array.isArray(entry.runs) && entry.runs.length > 0
+                   ? entry.runs : [[String(entry.body), ""]]
+        var lines = [{text: "", runs: []}]
+        for (var i = 0; i < runs.length; ++i) {
+            var pieces = String(runs[i][0]).split("\n")
+            for (var j = 0; j < pieces.length; ++j) {
+                if (j > 0)
+                    lines.push({text: "", runs: []})
+                if (pieces[j] === "")
+                    continue
+                var line = lines[lines.length - 1]
+                line.text += pieces[j]
+                line.runs.push([pieces[j], String(runs[i][1] || "")])
+            }
+        }
+        return lines
+    }
+
+    function stripEcho(lines, words) {
+        var start = 0
+        while (start < lines.length) {
+            var line = lines[start].text.trim()
+            if (line === "" || words.indexOf(line) >= 0)
+                ++start
+            else
+                break
+        }
+        return lines.slice(start)
+    }
+
+    function escapeStyled(text) {
+        return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+                .replace(/^ /, "&nbsp;").replace(/ {2}/g, " &nbsp;")
+    }
+
+    // Qt StyledText from line runs. Every character is escaped; the only
+    // markup is what this function writes.
+    function styledMarkup(lines, dimColor) {
+        var out = []
+        for (var i = 0; i < lines.length; ++i) {
+            var parts = []
+            for (var j = 0; j < lines[i].runs.length; ++j) {
+                var run = lines[i].runs[j]
+                var piece = escapeStyled(run[0])
+                var flags = run[1]
+                if (flags.indexOf("i") >= 0)
+                    piece = "<i>" + piece + "</i>"
+                if (flags.indexOf("b") >= 0)
+                    piece = "<b>" + piece + "</b>"
+                if (flags.indexOf("d") >= 0)
+                    piece = "<font color=\"" + dimColor + "\">" + piece + "</font>"
+                parts.push(piece)
+            }
+            out.push(parts.join(""))
+        }
+        return out.join("<br>")
+    }
+
+    function displayFor(result, query) {
+        var shaped = {pronunciation: "", sections: []}
+        if (!result)
+            return shaped
+        var entries = result.entries || []
+        var queryWord = String(query || "").trim()
+        for (var i = 0; i < entries.length; ++i) {
+            var entry = entries[i]
+            if (!entry || entry.body === undefined || entry.body === null)
+                continue
+            var words = [queryWord, String(entry.word || "").trim()]
+            var lines = stripEcho(entryLines(entry), words)
+            if (shaped.sections.length === 0 && shaped.pronunciation === "") {
+                // Character entries put radical and stroke lines first.
+                for (var k = 0; k < Math.min(4, lines.length); ++k) {
+                    var match = pronunciationPattern.exec(lines[k].text.trim())
+                    // A bracketed line counts only without Han characters, so
+                    // part-of-speech tags such as [動] stay in the body.
+                    // Source notes such as [Webster 1913 Suppl.] are not readings.
+                    if (match && match[2] && (/[\u3400-\u9fff]/.test(match[2])
+                                              || /\d{3,}|Webster|Suppl|Etym/.test(match[2])))
+                        match = null
+                    if (match) {
+                        shaped.pronunciation = (match[1] || match[2]).trim()
+                        lines.splice(k, 1)
+                        lines = stripEcho(lines, words)
+                        break
+                    }
+                }
+            }
+            // Collapse runs of blank lines and drop trailing ones.
+            var kept = []
+            for (var m = 0; m < lines.length; ++m) {
+                var blank = lines[m].text.trim() === ""
+                if (blank && (kept.length === 0 || kept[kept.length - 1].text.trim() === ""))
+                    continue
+                kept.push(lines[m])
+            }
+            while (kept.length > 0 && kept[kept.length - 1].text.trim() === "")
+                kept.pop()
+            if (kept.length === 0)
+                continue
+            var plain = kept.map(function(line) { return line.text }).join("\n")
+            shaped.sections.push({
+                source: String(entry.source || ""),
+                text: plain,
+                styled: Array.isArray(entry.runs) && entry.runs.length > 0,
+                lines: kept
+            })
+        }
+        // Results without backend entries (older schema, mock backends) keep
+        // the flat body as one unlabeled section.
+        if (shaped.sections.length === 0 && shaped.pronunciation === "") {
+            var body = resultBody(result)
+            if (body !== "")
+                shaped.sections.push({source: "", text: body, styled: false, lines: []})
+        }
+        return shaped
+    }
+
+    readonly property var activeDisplay: displayFor(activeResult(), queryText)
+
     function activeFullBody() {
         var result = activeResult()
         if (result && result.full_body !== undefined
