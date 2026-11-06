@@ -33,6 +33,10 @@ Item {
             outline: colors.outline,
             error: colors.error,
             on_error: colors.on_error || colors.onError,
+            secondary_container: colors.secondary_container
+                                 || colors.secondaryContainer,
+            on_secondary_container: colors.on_secondary_container
+                                    || colors.onSecondaryContainer,
             // matugen's {{mode}} ("dark"/"light") follows the generated scheme;
             // the boolean is the fallback for files without it.
             dark: document.mode === "dark" ? true
@@ -71,5 +75,15 @@ Item {
         onLoadFailed: function(error) {
             root.lastError = "palette-unavailable"
         }
+    }
+
+    // A theme file that does not exist yet (matugen has not run since the
+    // template was added) is retried, so the popup picks it up without a
+    // service restart.
+    Timer {
+        interval: 5000
+        repeat: true
+        running: root.active && root.lastError === "palette-unavailable"
+        onTriggered: paletteFile.reload()
     }
 }
