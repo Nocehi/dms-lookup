@@ -646,6 +646,69 @@ Item {
         return resultBody(activeResult())
     }
 
+    // ---- Display shaping ------------------------------------------------------
+    // The card shows each entry under its own source label instead of the flat
+    // body (which stays the copy/open payload). Headword echo lines (the word
+    // repeated by the renderer and again by many dictionaries) are dropped, and
+    // a leading pronunciation line of the first entry moves under the title.
+    readonly property var pronunciationPattern:
+        /^(?:音讀|讀音|注音|拼音|粵拼|粵音|发音|發音)\s*[：:]\s*(.+)$|^([\/\[][^\/\[\]]{1,60}[\/\]])$/
+
+    function stripEcho(lines, words) {
+        var start = 0
+        while (start < lines.length) {
+            var line = lines[start].trim()
+            if (line === "" || words.indexOf(line) >= 0)
+                ++start
+            else
+                break
+        }
+        return lines.slice(start)
+    }
+
+    function displayFor(result, query) {
+        var shaped = {pronunciation: "", sections: []}
+        if (!result)
+            return shaped
+        var entries = result.entries || []
+        var queryWord = String(query || "").trim()
+        for (var i = 0; i < entries.length; ++i) {
+            var entry = entries[i]
+            if (!entry || entry.body === undefined || entry.body === null)
+                continue
+            var words = [queryWord, String(entry.word || "").trim()]
+            var lines = stripEcho(String(entry.body).split("\n"), words)
+            if (shaped.sections.length === 0 && shaped.pronunciation === "") {
+                for (var k = 0; k < Math.min(2, lines.length); ++k) {
+                    var match = pronunciationPattern.exec(lines[k].trim())
+                    // A bracketed line counts only without Han characters, so
+                    // part-of-speech tags such as [動] stay in the body.
+                    if (match && match[2] && /[\u3400-\u9fff]/.test(match[2]))
+                        match = null
+                    if (match) {
+                        shaped.pronunciation = (match[1] || match[2]).trim()
+                        lines.splice(k, 1)
+                        lines = stripEcho(lines, words)
+                        break
+                    }
+                }
+            }
+            var text = lines.join("\n").replace(/\n{3,}/g, "\n\n").trim()
+            if (text !== "")
+                shaped.sections.push({source: String(entry.source || ""), text: text})
+        }
+        // Results without backend entries (older schema, mock backends) keep
+        // the flat body as one unlabeled section.
+        if (shaped.sections.length === 0 && shaped.pronunciation === "") {
+            var body = resultBody(result)
+            if (body !== "")
+                shaped.sections.push({source: "", text: body})
+        }
+        return shaped
+    }
+
+    readonly property var activeDisplay: displayFor(activeResult(), queryText)
+
     function activeFullBody() {
         var result = activeResult()
         if (result && result.full_body !== undefined

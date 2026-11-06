@@ -152,7 +152,8 @@ QtObject {
     readonly property string fontMono: "Sarasa Mono HC"
 
     // ---- Window and motion ---------------------------------------------------
-    readonly property real windowWidth: 620
+    // About 34 CJK characters per body line at fontSizeMedium.
+    readonly property real windowWidth: 560
     readonly property real windowHeight: 460
     readonly property real windowMinWidth: 440
     readonly property real windowMinHeight: 280
