@@ -7,9 +7,12 @@ translation, OCR, encyclopedia, LLM, telemetry, or query-history feature.
 
 The user-invoked `dank-lookup-selection` launcher sends only source and request
 metadata to Quickshell. Quickshell then explicitly starts its bounded capture
-mode, which reads the Wayland primary selection once and falls back to the
-regular clipboard once when necessary. Nothing watches or monitors either
-selection.
+mode, which reads the Wayland primary selection once. It reads the regular
+clipboard once only when primary is not `success_nonempty` and the user has set
+`"selection": {"clipboard_fallback": true}` in `config.json`; the default is
+off, and a `force-press` source never falls back, so an accidental deep press
+cannot put a copied password or token on screen. Nothing watches or monitors
+either selection.
 
 The captured query returns to QML through the capture process pipe. QML writes
 a bounded JSON envelope to `dank-lookup backend-request` over stdin; that client
@@ -28,8 +31,9 @@ displayed body to `wl-copy` over stdin.
 Selection capture requests the Wayland `text` MIME type and streams at most
 16 KiB from each producer. It reports `success_nonempty`, `success_empty`,
 `success_whitespace`, `too_large`, `unavailable`, `timeout`, or `command_error`
-separately for primary and clipboard. Clipboard
-fallback happens only when primary is not `success_nonempty`; an all-empty or
+separately for primary and clipboard (`not_attempted` when the clipboard was not
+read). Opt-in clipboard fallback happens only when primary is not
+`success_nonempty`; an all-empty or
 failed capture becomes a metadata-only UI state and never sends an empty query.
 `DANK_LOOKUP_PRIMARY_TIMEOUT_MS` and `DANK_LOOKUP_CLIPBOARD_TIMEOUT_MS` accept
 integers from 1 to 5000. Their production defaults remain 250 ms until the
