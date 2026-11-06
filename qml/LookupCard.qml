@@ -115,7 +115,7 @@ Item {
         Text {
             id: pronunciationLabel
             anchors.top: header.bottom
-            anchors.topMargin: visible ? root.theme.spacingXS : 0
+            anchors.topMargin: root.theme.spacingXS
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.leftMargin: root.theme.popoutPadding
@@ -123,7 +123,6 @@ Item {
             text: root.controller.phase === "ready"
                   ? root.controller.activeDisplay.pronunciation : ""
             visible: text !== ""
-            height: visible ? implicitHeight : 0
             color: root.theme.on_surface
             opacity: root.theme.textSecondary
             font.family: root.theme.fontUi
@@ -133,7 +132,9 @@ Item {
 
         Flickable {
             id: modeStrip
-            anchors.top: pronunciationLabel.bottom
+            // Anchor past the pronunciation only while it shows; a height
+            // binding on that Text made a binding loop.
+            anchors.top: pronunciationLabel.visible ? pronunciationLabel.bottom : header.bottom
             anchors.topMargin: visible ? root.theme.gap : 0
             anchors.left: parent.left
             anchors.right: parent.right
