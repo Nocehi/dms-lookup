@@ -17,8 +17,9 @@ Two report formats are known:
        over Bluetooth, untested on 0324):
            F2 53 01 <strength> 78 02 <sharp> 24 30 06 01 <deep> 18 48 12
 
---format auto picks usb if the node's report descriptor declares output report
-0x53, bt if it declares report 0xF2, and refuses otherwise (use --format to
+--format auto picks bt on a Bluetooth link (the descriptor there does not
+declare 0xF2, so it cannot be detected), usb if the node declares output report
+0x53, and refuses otherwise (use --format to
 force one; --dump shows the descriptor's report IDs so we learn either way).
 
 Usage:
@@ -113,13 +114,13 @@ def candidates():
 
 
 def fmt_for(c):
-    keys = {rid for _, rid in c["reps"]}
-    if c.get("bus") == 0x0005 and 0xF2 in keys:
-        return "bt"  # prefer the known Bluetooth wrapper on a Bluetooth link
+    # Over Bluetooth the descriptor does not declare 0xF2 (seen on the A3120:
+    # only in 0x02, feat 0x55, in 0x90); external tools write it regardless,
+    # and hidraw does not check. So a Bluetooth link defaults to bt.
+    if c.get("bus") == 0x0005:
+        return "bt"
     if ("out", 0x53) in c["reps"]:
         return "usb"
-    if 0xF2 in keys:
-        return "bt"
     return None
 
 
@@ -168,8 +169,8 @@ def main():
     if a.node and chosen is None:
         sys.exit(f"{a.node} is not one of the nodes above")
     if chosen is None:
-        sys.exit("No node declares output 0x53 or report 0xF2. Run with --dump and "
-                 "send the output; you can still try --node /dev/hidrawN --format bt.")
+        sys.exit("No USB node declares output 0x53 and no Bluetooth node found. "
+                 "Run with --dump; you can still force one with --node /dev/hidraw1 --format bt.")
     fmt = chosen and (a.format if a.format != "auto" else fmt_for(chosen))
     if not fmt:
         sys.exit(f"{chosen['node']}: format unknown; pass --format usb or --format bt")

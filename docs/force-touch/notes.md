@@ -74,7 +74,7 @@ sent
 
 以 sudo 執行 `--fire --count 3`，觸控板震了三下，確認在 A3120（USB）上能按需觸發 Taptic 回饋。
 
-**藍牙：待測（2026-11-06 起）。** 外部專案已在 `0265` 經藍牙時按需觸發觸覺（見 2.1），A3120 經藍牙尚未試過。新版腳本 `tools/force-touch/haptic_pulse.py` 按產品 ID 配對，同時認 USB 廠商 ID `05ac` 與藍牙廠商 ID `004c`，並支援藍牙的 `0xF2` 報告格式；步驟見 [`bluetooth-haptics-test.md`](bluetooth-haptics-test.md)。
+**藍牙：已驗證可震（2026-11-06 19:57，Nocehi 實測）。** A3120 經藍牙配對後出現 `/dev/hidraw1`（`HID_ID=0005:0000004C:00000324`，`HID_NAME=Magic Trackpad`，不是「…USB-C」）。其報告描述只宣告 `in 0x02`（7 B）、`feature 0x55`（64 B）、`in 0x90`，沒有 `0xF2` 也沒有 `0x53`，但照外部專案的做法直接寫入 `F2 53 01 30 78 02 10 24 30 06 01 10 18 48 12`（sudo，`--count 3`），觸控板有震，且聽得見聲音。我們 USB 用的 14 字節 `53 01 …` 經藍牙寫入也沒有報錯，但**不會震**（藍牙寫入不報錯不代表被接受）。結論：藍牙必須用 `0xF2` 包住的格式；描述裏沒有宣告這個報告，只能按傳輸方式決定格式。現行 udev 規則沒有涵蓋藍牙節點（實測 `writable=no`），現行監聽程式也只找 `05ac`，所以深壓在藍牙下仍不會震，兩者待改。新版腳本 `bt-haptics/haptic_pulse.py` 按產品 ID 配對，同時認 USB 廠商 ID `05ac` 與藍牙廠商 ID `004c`，並支援藍牙的 `0xF2` 報告格式；步驟見 `bt-haptics/bt-haptics-test.md`。 新版腳本 `tools/force-touch/haptic_pulse.py` 按產品 ID 配對，同時認 USB 廠商 ID `05ac` 與藍牙廠商 ID `004c`，並支援藍牙的 `0xF2` 報告格式；步驟見 [`bluetooth-haptics-test.md`](bluetooth-haptics-test.md)。
 
 ---
 
@@ -173,7 +173,7 @@ sudo rm /etc/udev/rules.d/70-dank-magic-trackpad-haptic.rules && sudo udevadm co
 ### 3.3 已知限制
 
 - **裕度在時間軸，不在壓力軸**：自然使用數據（`margin-probe/`，34 次，其中深壓 5 次）顯示，普通點擊壓力 ≥ 160 的最長連續時間 ≤ 44 ms，深壓則持續 265–818 ms；維持時間 80 ms 正落在兩者之間。壓力門檻 160 只是入口條件：普通點擊的峰值可達 171，`area-probe/` 中甚至有 198，壓力上本來就沒有乾淨的分界，靠的是「能否在 160 以上停留 80 ms」。深壓樣本仍少，第一階段日誌（含設計稿 6.1 的重試率）會再確認。多級壓力與以時間做第二級均不可行，見設計稿 9.1。
-- **觸覺：USB 已驗證，藍牙待測**：藍牙連接時查詢照常運作。現行監聽程式只在 `05ac` 底下找觸覺節點，所以藍牙下不會震；udev 規則用 `ATTRS{idVendor}=="05ac"`，藍牙 hidraw 沒有 USB 祖先，預期不會套用（須加 `KERNELS=="0005:004C:0324.*"`）。兩者都等藍牙測試結果再改。
+- **觸覺：USB 與藍牙都已驗證可震（藍牙 2026-11-06，見 1.4），但安裝的元件只支援 USB**：藍牙連接時查詢照常運作。現行監聽程式只在 `05ac` 底下找觸覺節點，所以藍牙下不會震；udev 規則用 `ATTRS{idVendor}=="05ac"`，藍牙 hidraw 沒有 USB 祖先，預期不會套用（須加 `KERNELS=="0005:004C:0324.*"`）。（藍牙實測已證實 `writable=no`。）下一步：規則加藍牙行、監聽程式在 `004c` 下改送 `0xF2` 格式。
 - **樣本有限**：只有單指、USB、兩輪樣本。換手指、斜按、改用藍牙時數值可能不同。
 - **須先選字**：Linux 點擊不會自動選字，未選字時深壓查不到東西。
 - **實驗性質**：監聽程式、服務與 udev 規則已納入 repo（2026-11-06），但預設安裝程式 `packaging/install-user.sh` 不會安裝或啟用它們，須另行執行 `packaging/install-force-touch.sh`。

@@ -1,5 +1,7 @@
 # A3120 藍牙觸覺測試步驟
 
+> 結果（2026-11-06）：藍牙下 `--format bt` 會震（有聲），`--format usb` 寫入不報錯但不震。詳見 [`notes.md`](notes.md) 1.4。
+
 目的：確定 A3120（產品 ID `0324`）經藍牙連線時能否按需觸發觸覺。外部專案只在 `0265` 經藍牙時驗證過（見 [`notes.md`](notes.md) 2.1）。
 
 相關檔案：
@@ -50,7 +52,7 @@ python3 haptic_pulse.py --fire --count 3
 
 - 若顯示 `not writable`：現行規則沒有涵蓋藍牙節點（預期如此，見第四節）。改用 `sudo python3 haptic_pulse.py --fire --count 3` 測觸覺本身。
 - 若顯示 `No node declares output 0x53 or report 0xF2`：把 `--dump` 輸出貼給我。仍可手動試：
-  `sudo python3 haptic_pulse.py --node /dev/hidrawN --format bt --fire`，再試 `--format usb`。
+  `sudo python3 haptic_pulse.py --node /dev/hidraw1 --format bt --fire`（把 1 換成 `--dump` 列出的藍牙節點編號），再試 `--format usb`。
 - 若顯示 `write failed`：記下錯誤碼。
 
 請記下：`--dump` 的完整輸出、選了哪個格式、有沒有震、震感和 USB 時比較如何。
