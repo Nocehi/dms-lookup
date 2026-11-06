@@ -12,9 +12,10 @@ Two report formats are known:
   usb  14 bytes, output report 0x53 on the separate "Actuator" interface
        (AppleMagicTouchstreamLP; verified on our A3120 over USB):
            53 01 <strength u32 LE> 21 2B 06 01 00 16 41 13
-  bt   15 bytes, report 0xF2 wrapping the same 53 01 ... payload
-       (Magic-TP-extended / LinuxMagicForce; verified by them only on 0265
-       over Bluetooth, untested on 0324):
+  bt   15 bytes: the usb report prefixed with report ID 0xF2 (verified on
+       the A3120 over Bluetooth 2026-11-06; same feel as USB)
+  mtp  15 bytes, Magic-TP-extended / LinuxMagicForce waveform (verified by
+       them on 0265, and on our A3120 over Bluetooth; louder at 0x30):
            F2 53 01 <strength> 78 02 <sharp> 24 30 06 01 <deep> 18 48 12
 
 --format auto picks bt on a Bluetooth link (the descriptor there does not
@@ -125,8 +126,11 @@ def fmt_for(c):
 
 
 def build(fmt, a):
+    usb = bytes([0x53, 0x01]) + struct.pack("<I", a.strength) + USB_TAIL
     if fmt == "usb":
-        return bytes([0x53, 0x01]) + struct.pack("<I", a.strength) + USB_TAIL
+        return usb
+    if fmt == "bt":
+        return b"\xF2" + usb
     return bytes([0xF2, 0x53, 0x01, a.bt_strength, 0x78, 0x02, a.sharp, 0x24,
                   0x30, 0x06, 0x01, a.deep, 0x18, 0x48, 0x12])
 
@@ -137,13 +141,13 @@ def main():
     ap.add_argument("--fire", action="store_true", help="actually send")
     ap.add_argument("--dump", action="store_true", help="print report IDs/sizes")
     ap.add_argument("--node", help="use this /dev/hidrawN instead of auto")
-    ap.add_argument("--format", choices=["auto", "usb", "bt"], default="auto")
+    ap.add_argument("--format", choices=["auto", "usb", "bt", "mtp"], default="auto")
     ap.add_argument("--strength", type=lambda x: int(x, 0), default=0x00026C19,
-                    help="usb format strength u32 (default 0x00026C19)")
+                    help="usb/bt format strength u32 (default 0x00026C19)")
     ap.add_argument("--bt-strength", type=byte, default=0x30,
-                    help="bt format byte 3 (Magic-TP-extended default 0x30)")
-    ap.add_argument("--sharp", type=byte, default=0x10, help="bt byte 6, keep <= 0x20")
-    ap.add_argument("--deep", type=byte, default=0x10, help="bt byte 11, keep <= 0x40")
+                    help="mtp format byte 3 (Magic-TP-extended default 0x30)")
+    ap.add_argument("--sharp", type=byte, default=0x10, help="mtp byte 6, keep <= 0x20")
+    ap.add_argument("--deep", type=byte, default=0x10, help="mtp byte 11, keep <= 0x40")
     ap.add_argument("--count", type=int, default=1)
     ap.add_argument("--interval", type=float, default=0.25)
     a = ap.parse_args()

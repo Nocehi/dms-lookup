@@ -7,14 +7,14 @@ for --hold ms, and that finger must not have moved more than --max-move mm
 since the button went down (a hard drag-select is not a deep press). At that
 moment a haptic pulse is sent (needs write access to the trackpad's hidraw
 node: the "Actuator" interface over USB, the single node over Bluetooth, where
-the 0xF2-wrapped report is used); the lookup fires when the
+the same report is prefixed with ID 0xF2); the lookup fires when the
 button is released (so a drag selection is finalised first).
 
 Usage:
   dank-force-press-watch --dry-run -v   # log only, never runs lookup
   dank-force-press-watch                # runs dank-lookup-selection
 Options: --force 160 --hold 80 --max-move 3.0 --cooldown 400 --cmd PATH
-         --no-haptic --strength 0x26C19 --bt-strength 0x30
+         --no-haptic --strength 0x26C19
 Logs pressure, timing and trackpad travel only; never reads or logs text.
 Every press logs move_mm (travel before force). A press that follows a deep
 press within 1 s with < 2 mm cursor travel in between and is not itself deep
@@ -64,14 +64,6 @@ def _has_output_0x53(sys_hidraw):
 BUS_USB, BUS_BLUETOOTH = 0x03, 0x05
 
 
-def bt_report(strength):
-    """15-byte Bluetooth haptic report (Magic-TP-extended layout). The A3120's
-    Bluetooth descriptor does not declare 0xF2, but the trackpad acts on it;
-    the USB 0x53 report is accepted over Bluetooth yet does nothing."""
-    return bytes([0xF2, 0x53, 0x01, strength & 0xFF, 0x78, 0x02, 0x10, 0x24,
-                  0x30, 0x06, 0x01, 0x10, 0x18, 0x48, 0x12])
-
-
 class Haptic:
     """Best effort: any failure just disables the pulse until next rescan.
 
@@ -79,9 +71,12 @@ class Haptic:
     looked for on the same transport, so a trackpad that is both plugged in
     and paired never pulses over the link it is not using."""
 
-    def __init__(self, strength, bt_strength=0x30, bus=BUS_USB):
+    def __init__(self, strength, bus=BUS_USB):
         usb = bytes([0x53, 0x01]) + struct.pack("<I", strength) + HAPTIC_TAIL
-        self.report = bt_report(bt_strength) if bus == BUS_BLUETOOTH else usb
+        # Over Bluetooth the same payload goes out behind report ID 0xF2
+        # (verified on the A3120 2026-11-06; the bare 0x53 report is accepted
+        # there but does nothing, and the descriptor declares neither ID).
+        self.report = b"\xF2" + usb if bus == BUS_BLUETOOTH else usb
         self.bus = bus
         self.fd = None
         self.node = None
@@ -251,9 +246,7 @@ def main():
                     or shutil.which("dank-lookup-selection"))
     ap.add_argument("--no-haptic", action="store_true")
     ap.add_argument("--strength", type=lambda x: int(x, 0), default=0x00026C19,
-                    help="USB pulse strength (u32)")
-    ap.add_argument("--bt-strength", type=lambda x: int(x, 0), default=0x30,
-                    help="Bluetooth pulse strength (byte; 0x30 verified, audible)")
+                    help="pulse strength (u32), same on USB and Bluetooth")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -266,7 +259,7 @@ def main():
         if dev is None:
             time.sleep(2)
             continue
-        haptic = Haptic(args.strength, args.bt_strength, dev.info.bus)
+        haptic = Haptic(args.strength, dev.info.bus)
         if args.no_haptic:
             haptic.close()
         log(f"watching {dev.path} {dev.name!r} "

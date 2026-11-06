@@ -166,17 +166,17 @@ class HapticDiscoveryTest(unittest.TestCase):
         with mock.patch.object(self.w.glob, "glob",
                                lambda _p: real_glob(str(self.root / "hidraw*"))), \
              mock.patch.object(self.w.os, "open", lambda p, _f: opened.append(p) or 99):
-            h = self.w.Haptic(0x26C19, 0x30, bus)
+            h = self.w.Haptic(0x26C19, bus)
         h.fd = None  # never close the fake fd
         return h, opened
 
-    def test_bluetooth_uses_f2_report_on_004c_node(self):
+    def test_bluetooth_prefixes_usb_report_with_f2_on_004c_node(self):
         self.node("hidraw4", "0005:000005AC:0000AAAA")      # unrelated BT device
         self.node("hidraw1", "0005:0000004C:00000324",       # A3120: no 0xF2 declared
                   bytes([0x85, 0x02, 0x81, 0x02, 0x85, 0x55, 0xB1, 0x02]))
         h, opened = self.haptic(self.w.BUS_BLUETOOTH)
         self.assertEqual(opened, ["/dev/hidraw1"])
-        self.assertEqual(h.report.hex(" "), "f2 53 01 30 78 02 10 24 30 06 01 10 18 48 12")
+        self.assertEqual(h.report.hex(" "), "f2 53 01 19 6c 02 00 21 2b 06 01 00 16 41 13")
 
     def test_usb_keeps_0x53_actuator_and_ignores_bluetooth_node(self):
         self.node("hidraw1", "0005:0000004C:00000324")

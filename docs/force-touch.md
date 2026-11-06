@@ -3,8 +3,8 @@
 > **Status: experimental dogfood, off by default.** Tested on one Apple Magic
 > Trackpad (A3120, USB-C, `05ac:0324`) over **USB** on CachyOS / niri 26.04 /
 > libinput 1.32. Haptic feedback works over USB and, since 2026-11-06, over
-> Bluetooth (the watcher sends the Bluetooth `0xF2` report when the touch device
-> is on Bluetooth). `packaging/install-user.sh`
+> Bluetooth (the watcher sends the same report behind ID `0xF2` when the touch
+> device is on Bluetooth). `packaging/install-user.sh`
 > does not install or enable anything described here, and
 > `packaging/uninstall-user.sh` does not remove it.
 
@@ -60,8 +60,7 @@ sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw
 
 Check: `journalctl --user -u dank-force-press -n 5` should show
 `haptic on /dev/hidrawN`. `not writable` means the rule has not applied yet;
-replug the cable, or reconnect over Bluetooth. Bluetooth pulse strength:
-`--bt-strength` (default `0x30`, audible; try `0x18` for a quieter pulse).
+replug the cable, or reconnect over Bluetooth. `--strength` applies to both.
 
 ## Tune
 

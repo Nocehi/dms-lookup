@@ -1,6 +1,6 @@
 # A3120 藍牙觸覺測試步驟
 
-> 結果（2026-11-06）：藍牙下 `--format bt` 會震（有聲），`--format usb` 寫入不報錯但不震。詳見 [`notes.md`](notes.md) 1.4。
+> 結果（2026-11-06）：藍牙下 Magic-TP-extended 波形（現為 `--format mtp`）會震（有聲）；`F2` 加 USB 內容（現為 `--format bt`）也會震；不加 `F2` 的 `--format usb` 寫入不報錯但不震。詳見 [`notes.md`](notes.md) 1.4。
 
 目的：確定 A3120（產品 ID `0324`）經藍牙連線時能否按需觸發觸覺。外部專案只在 `0265` 經藍牙時驗證過（見 [`notes.md`](notes.md) 2.1）。
 
