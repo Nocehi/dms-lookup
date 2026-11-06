@@ -8,5 +8,7 @@
   "outline": "{{colors.outline.default.hex}}",
   "error": "{{colors.error.default.hex}}",
   "on_error": "{{colors.on_error.default.hex}}",
+  "secondary_container": "{{colors.secondary_container.default.hex}}",
+  "on_secondary_container": "{{colors.on_secondary_container.default.hex}}",
   "dark": true
 }

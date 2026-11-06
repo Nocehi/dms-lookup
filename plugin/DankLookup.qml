@@ -28,6 +28,8 @@ PluginComponent {
         readonly property color outline: Theme.outline
         readonly property color error: Theme.error
         readonly property color on_error: Theme.onError
+        readonly property color secondary_container: Theme.secondaryContainer
+        readonly property color on_secondary_container: Theme.onSecondaryContainer
         readonly property bool dark: !Theme.isLightMode
 
         readonly property real radiusSmall: Theme.cornerRadiusS

@@ -26,7 +26,8 @@ QtObject {
     readonly property var requiredPaletteKeys: ["primary", "on_primary", "surface",
                                                 "surface_container_high", "on_surface",
                                                 "outline"]
-    readonly property var optionalPaletteKeys: ["error", "on_error"]
+    readonly property var optionalPaletteKeys: ["error", "on_error", "secondary_container",
+                                                "on_secondary_container"]
 
     // Built-in palettes used without matugen/DMS (Material 3 baseline roles).
     readonly property var fallbackPalettes: ({
@@ -38,7 +39,9 @@ QtObject {
             "on_surface": "#e8e0e9",
             "outline": "#958e99",
             "error": "#ffb4ab",
-            "on_error": "#690005"
+            "on_error": "#690005",
+            "secondary_container": "#4a4458",
+            "on_secondary_container": "#e8def8"
         },
         "light": {
             "primary": "#5f43a8",
@@ -48,7 +51,9 @@ QtObject {
             "on_surface": "#1d1a20",
             "outline": "#78717c",
             "error": "#ba1a1a",
-            "on_error": "#ffffff"
+            "on_error": "#ffffff",
+            "secondary_container": "#e8def8",
+            "on_secondary_container": "#1d192b"
         }
     })
 
@@ -60,6 +65,8 @@ QtObject {
     readonly property color outline: paletteColor("outline")
     readonly property color error: paletteColor("error")
     readonly property color on_error: paletteColor("on_error")
+    readonly property color secondary_container: paletteColor("secondary_container")
+    readonly property color on_secondary_container: paletteColor("on_secondary_container")
 
     // ---- Shape ---------------------------------------------------------------
     readonly property real radiusSmall: hostValue("radiusSmall", 12)
@@ -82,6 +89,9 @@ QtObject {
     readonly property real controlHeight: 32
     readonly property real chipHeight: 28
     readonly property real iconButtonSize: 32
+    // Close glyph drawn from two strokes, so it needs no icon font.
+    readonly property real closeIconSize: 14
+    readonly property real iconStroke: 2
     readonly property real progressHeight: 3
     readonly property real minChipWidth: 40
     readonly property real minControlWidth: 72
@@ -91,6 +101,10 @@ QtObject {
     readonly property int headingMaxLines: 2
 
     // ---- Surface, outline, elevation -----------------------------------------
+    // DMS popouts are translucent only because the compositor blurs what is
+    // behind them (ext-background-effect). The card asks for the same blur;
+    // without it 0.9 lets the window behind show through the text.
+    readonly property bool backgroundBlur: hostValue("backgroundBlur", true)
     readonly property real surfaceOpacity: hostValue("surfaceOpacity", 0.9)
     readonly property real outlineOpacity: 0.35
     readonly property real dividerOpacity: 0.35

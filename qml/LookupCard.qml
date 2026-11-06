@@ -18,6 +18,14 @@ Item {
         return root.theme.withAlpha(color, amount)
     }
 
+    // Card chrome follows the system locale: Traditional Chinese under zh*,
+    // English otherwise. Dictionary text is never translated.
+    readonly property bool chineseUi: Qt.locale().name.indexOf("zh") === 0
+
+    function ui(english, chinese) {
+        return root.chineseUi ? chinese : english
+    }
+
     // Elevation level 2 (DMS popout baseline). RectangularShadow needs Qt 6.9+.
     RectangularShadow {
         anchors.fill: card
@@ -52,7 +60,8 @@ Item {
                 anchors.rightMargin: root.theme.gap
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.controller.queryText !== ""
-                      ? root.controller.queryText : "Reading selection…"
+                      ? root.controller.queryText
+                      : root.ui("Reading selection…", "讀取選取文字…")
                 color: root.theme.on_surface
                 // Jigmo for CJK headwords (DANK_LOOKUP_HEADWORD_FONT overrides),
                 // Asebi Mincho for other headings. `font.families` is not
@@ -73,13 +82,23 @@ Item {
                 implicitHeight: root.theme.iconButtonSize
                 hoverEnabled: true
 
-                contentItem: Text {
-                    text: "×"
-                    color: root.theme.on_surface
-                    font.family: root.theme.fontUi
-                    font.pixelSize: root.theme.fontSizeXLarge
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
+                Accessible.name: root.ui("Close", "關閉")
+
+                contentItem: Item {
+                    Repeater {
+                        model: [45, -45]
+
+                        Rectangle {
+                            required property real modelData
+                            anchors.centerIn: parent
+                            width: root.theme.closeIconSize
+                            height: root.theme.iconStroke
+                            radius: root.theme.radiusFull
+                            rotation: modelData
+                            color: root.theme.on_surface
+                            antialiasing: true
+                        }
+                    }
                 }
 
                 background: Rectangle {
@@ -186,7 +205,7 @@ Item {
 
                     contentItem: Text {
                         id: wholeText
-                        text: "Whole"
+                        text: root.ui("Whole", "整句")
                         color: root.theme.on_surface
                         opacity: root.controller.activeToken === "" ? 1.0
                                                                     : root.theme.textSecondary
@@ -283,7 +302,8 @@ Item {
                 anchors.rightMargin: root.theme.spacingS
                 anchors.verticalCenter: parent.verticalCenter
                 text: {
-                    var kind = root.controller.showRelated ? "Related" : "Exact"
+                    var kind = root.controller.showRelated ? root.ui("Related", "相關")
+                                                           : root.ui("Exact", "精確")
                     var mode = root.controller.activeLabel()
                     var source = root.controller.activeSubtitle()
                     var pieces = [kind]
@@ -309,13 +329,15 @@ Item {
                 text: root.controller.activeTruncated()
                       || root.controller.activeFullRef() !== ""
                       ? (root.controller.activeFullChars() > 0
-                         ? "Preview · full entry: "
-                           + root.controller.activeFullChars() + " chars"
-                         : "Preview · full entry available")
+                         ? root.ui("Preview · full entry: "
+                                   + root.controller.activeFullChars() + " chars",
+                                   "預覽 · 完整條目 "
+                                   + root.controller.activeFullChars() + " 字")
+                         : root.ui("Preview · full entry available", "預覽 · 另有完整條目"))
                       : (incomplete !== ""
                          ? incomplete
                          : (root.controller.unavailableModes.length > 0
-                            ? "Unavailable: "
+                            ? root.ui("Unavailable: ", "無法使用：")
                               + root.controller.unavailableModes.join(", ") : ""))
                 color: incomplete !== "" && text === incomplete ? root.theme.error
                                                                 : root.theme.primary
@@ -358,7 +380,8 @@ Item {
                 Text {
                     width: parent.width
                     text: root.controller.queryText === ""
-                          ? "Reading selected text…" : "Looking up locally…"
+                          ? root.ui("Reading selected text…", "讀取選取文字…")
+                          : root.ui("Looking up locally…", "本機查詢中…")
                     color: root.theme.on_surface
                     opacity: root.theme.textSecondary
                     font.family: root.theme.fontUi
@@ -493,7 +516,8 @@ Item {
 
                         contentItem: Text {
                             id: relationText
-                            text: relationButton.modelData ? "Related" : "Exact"
+                            text: relationButton.modelData ? root.ui("Related", "相關")
+                                                           : root.ui("Exact", "精確")
                             color: relationButton.selected ? root.theme.on_primary
                                                            : root.theme.on_surface
                             font.family: root.theme.fontUi
@@ -523,12 +547,16 @@ Item {
                 visible: root.controller.phase === "ready"
                          && root.controller.activeBody() !== ""
 
+                // Copy is a text button; Open full is the tonal (secondary
+                // container) button, as in DMS. Pill shape: DMS buttons up to
+                // 40 px use corner "m", which is a full pill at this height.
                 Repeater {
-                    model: ["Copy", "Open full"]
+                    model: ["copy", "open"]
 
                     T.Button {
                         id: actionButton
                         required property string modelData
+                        property bool tonal: modelData === "open"
                         implicitWidth: Math.max(root.theme.minControlWidth,
                                                 actionText.implicitWidth
                                                 + 2 * root.theme.spacingL)
@@ -537,25 +565,35 @@ Item {
 
                         contentItem: Text {
                             id: actionText
-                            text: actionButton.modelData
-                            color: root.theme.on_surface
+                            text: actionButton.tonal ? root.ui("Open full", "完整條目")
+                                                     : root.ui("Copy", "複製")
+                            color: actionButton.tonal ? root.theme.on_secondary_container
+                                                      : root.theme.primary
                             font.family: root.theme.fontUi
                             font.pixelSize: root.theme.fontSizeSmall
+                            font.weight: Font.Medium
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
                         }
 
                         background: Rectangle {
-                            radius: root.theme.radiusSmall
-                            color: actionButton.hovered
-                                   ? root.alpha(root.theme.primary, root.theme.stateHover)
+                            radius: root.theme.radiusFull
+                            color: actionButton.tonal
+                                   ? root.theme.secondary_container
                                    : "transparent"
-                            border.color: root.theme.borderColor
-                            border.width: root.theme.borderWidth
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: parent.radius
+                                color: actionButton.tonal ? root.theme.on_secondary_container
+                                                          : root.theme.primary
+                                opacity: actionButton.down ? root.theme.stateSelected
+                                         : (actionButton.hovered ? root.theme.stateHover : 0)
+                            }
                         }
 
-                        onClicked: actionButton.modelData === "Copy"
-                                   ? root.copyRequested() : root.openFullRequested()
+                        onClicked: actionButton.tonal ? root.openFullRequested()
+                                                      : root.copyRequested()
                     }
                 }
             }
