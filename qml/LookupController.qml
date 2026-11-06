@@ -735,7 +735,9 @@ Item {
                     var match = pronunciationPattern.exec(lines[k].text.trim())
                     // A bracketed line counts only without Han characters, so
                     // part-of-speech tags such as [動] stay in the body.
-                    if (match && match[2] && /[\u3400-\u9fff]/.test(match[2]))
+                    // Source notes such as [Webster 1913 Suppl.] are not readings.
+                    if (match && match[2] && (/[\u3400-\u9fff]/.test(match[2])
+                                              || /\d{3,}|Webster|Suppl|Etym/.test(match[2])))
                         match = null
                     if (match) {
                         shaped.pronunciation = (match[1] || match[2]).trim()

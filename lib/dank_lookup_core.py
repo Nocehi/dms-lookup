@@ -9,7 +9,6 @@ and returns JSON-serialisable data.
 from __future__ import annotations
 
 import hashlib
-import difflib
 import html
 from html.parser import HTMLParser
 import json
@@ -316,6 +315,8 @@ def _html_flags(raw: str, plain: str) -> list[set[str]] | None:
     else:
         return result
     result = [set() for _ in plain]
+    import difflib  # rare fallback; kept off the one-shot import path
+
     matcher = difflib.SequenceMatcher(None, source, plain, autojunk=False)
     for tag, a0, a1, b0, b1 in matcher.get_opcodes():
         if tag != "equal":
