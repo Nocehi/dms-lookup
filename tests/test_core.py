@@ -1538,6 +1538,43 @@ class StyleRunTests(unittest.TestCase):
         self.assertEqual(entry["body"], "[hao3] good | proper")
         self.assertEqual("".join(text for text, _ in entry["runs"]), entry["body"])
 
+    def test_wangli_attribute_text_is_kept(self):
+        raw = ('<link href="王力.css" rel="stylesheet"><tou><hw>春</hw>'
+               '<a pg href="bword://WL0429">429</a><a rs="5" href="bword://⽇">⽇</a></tou>'
+               '<yin><py><a href="bword://chun#1">chūn</a></py><gu w="春0"><MC><Mi>tsyh</Mi>'
+               '<Mf>win</Mf></MC>昌脣切。</gu></yin>'
+               '<p n="❶">春季。<z><i>荀子</i>：“<w w="春"></w>耕，夏耘。”</z>'
+               '<ci>春秋</ci>指史書。</p><div t="備考">通“蠢”。</div>')
+        plain, runs = self.styled(raw, "html", name="王力古漢語字典 Mastameta")
+        self.assertIn("“春耕，夏耘。”", plain)
+        self.assertIn("春 429 ⽇\n", plain)
+        self.assertIn("chūn tsyhwin昌脣切。", plain)
+        self.assertIn("❶ 春季。", plain)
+        self.assertIn("備考 通“蠢”。", plain)
+        self.assertEqual(self.flags_of(runs, "❶"), "bd")
+        self.assertEqual(self.flags_of(runs, "429"), "d")
+        self.assertEqual(self.flags_of(runs, "春秋"), "b")
+        quote = [run for run in runs if run[0].endswith("：“")][0]
+        self.assertEqual(runs[runs.index(quote) + 1], ["春", "b"])
+
+    def test_attribute_word_does_not_duplicate_element_text(self):
+        plain, _ = self.styled('<w w="春">春</w>耕', "html")
+        self.assertEqual(plain, "春耕")
+
+    def test_ordered_lists_are_numbered_without_blank_lines(self):
+        plain, runs = self.styled("<ol><li>甲</li><li>乙</li></ol><ul><li>丙</li></ul>"
+                                  '<ol style="list-style-type:lower-alpha"><li>丁</li></ol>', "html")
+        self.assertEqual(plain, "1. 甲\n2. 乙\n• 丙\na. 丁")
+        self.assertEqual(self.flags_of(runs, "2. "), "bd")
+        self.assertEqual(self.flags_of(runs, "• "), "d")
+
+    def test_slash_rule_dims_ipa_but_not_and_or_prose(self):
+        _, runs = self.styled("unintended, and/or unexpected, but discovery and/or learning")
+        self.assertEqual(runs, [])
+        _, runs = self.styled("serendipity /ˌsɛɹ.ənˈdɪp.ɪ.ti/, look up /lʊk ʌp/")
+        self.assertEqual(self.flags_of(runs, "/ˌsɛɹ.ənˈdɪp.ɪ.ti/"), "d")
+        self.assertEqual(self.flags_of(runs, "/lʊk ʌp/"), "d")
+
     def test_truncated_preview_runs_match_preview_text(self):
         import dank_lookup_core as core
 

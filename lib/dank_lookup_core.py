@@ -130,30 +130,115 @@ def builtin_config() -> dict[str, Any]:
 
 
 class _PlainTextParser(HTMLParser):
+    """Text of an HTML definition, one ``_emit`` call per piece.
+
+    Besides element text this keeps text that some dictionaries carry only in
+    attributes, because dropping it loses dictionary content. 王力古漢語字典
+    writes the headword inside quotations as ``<w w="春"></w>`` and sense
+    numbers as ``<p n="❶">``; its stylesheet shows them with ``attr()``.
+    """
+
     _BLOCK_TAGS = frozenset({"br", "p", "div", "li", "tr", "hr", "section"})
+    # Attributes whose value is shown in front of a paragraph (王力 sense
+    # numbers ❶ and ①, the 備考 section label).
+    _LABEL_ATTRIBUTES = {"p": ("n", "num"), "div": ("t",)}
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self._lists: list[list[Any]] = []
+        self._attribute_word: list[str | None] = []
+        self._header_depth = 0
+
+    # Subclasses record styling here; flags name the extra styles of a piece.
+    def _emit(self, text: str, flags: frozenset[str] = frozenset()) -> None:
+        self.parts.append(text)
+
+    def _ends_with(self, characters: str) -> bool:
+        for part in reversed(self.parts):
+            if part:
+                return part[-1] in characters
+        return True
+
+    def _ends_with_newline(self) -> bool:
+        return self._ends_with("\n")
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.casefold() in self._BLOCK_TAGS:
-            self.parts.append("\n")
-        if tag.casefold() == "li":
-            self.parts.append("• ")
+        name = tag.casefold()
+        values = {key.casefold(): (value or "") for key, value in attrs}
+        self._open(name, values)
+        if name in self._BLOCK_TAGS and not (name == "li" and self._ends_with_newline()):
+            self._emit("\n")
+        if name in {"ol", "ul"}:
+            style = values.get("style", "").casefold().replace(" ", "")
+            alpha = "lower-alpha" in style or values.get("type") == "a"
+            self._lists.append([name, 0, alpha])
+        elif name == "li":
+            self._emit(self._list_marker(), frozenset({"b", "d"}) if self._lists and self._lists[-1][0] == "ol" else frozenset({"d"}))
+        for attribute in self._LABEL_ATTRIBUTES.get(name, ()):
+            label = values.get(attribute, "").strip()
+            if label:
+                self._emit(label + " ", frozenset({"b", "d"}))
+                break
+        if name in {"tou", "yin"}:
+            # 王力 headword line and reading lines: start a new line, and let
+            # the following sense paragraph start right below them.
+            if not self._ends_with_newline() or name == "yin":
+                self._emit("\n")
+            self._header_depth += 1
+        elif self._header_depth and (
+            name in {"py", "mc", "gu"} or (name == "a" and ("pg" in values or "rs" in values))
+        ):
+            # Separate the page, radical, pinyin and Middle Chinese columns
+            # of the 王力 headword line instead of running them together.
+            if not self._ends_with("\n "):
+                self._emit(" ")
+        if name == "w":
+            self._attribute_word.append(values.get("w", "").strip() or None)
+
+    def _open(self, name: str, values: Mapping[str, str]) -> None:
+        """Hook for subclasses, called before anything is emitted."""
+
+    def _list_marker(self) -> str:
+        if not self._lists or self._lists[-1][0] != "ol":
+            return "• "
+        self._lists[-1][1] += 1
+        number = self._lists[-1][1]
+        if self._lists[-1][2] and number <= 26:
+            return f"{chr(ord('a') + number - 1)}. "
+        return f"{number}. "
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.casefold() in self._BLOCK_TAGS:
-            self.parts.append("\n")
+        name = tag.casefold()
+        if name == "w" and self._attribute_word:
+            word = self._attribute_word.pop()
+            if word is not None:
+                self._emit(word, frozenset({"b"}))
+        if name in self._BLOCK_TAGS:
+            self._emit("\n")
+        if name in {"ol", "ul"}:
+            for index in range(len(self._lists) - 1, -1, -1):
+                if self._lists[index][0] == name:
+                    del self._lists[index:]
+                    break
+        if name in {"tou", "yin"} and self._header_depth:
+            self._header_depth -= 1
+        self._close(name)
+
+    def _close(self, name: str) -> None:
+        """Hook for subclasses, called after the end tag is handled."""
 
     def handle_data(self, data: str) -> None:
-        self.parts.append(data)
+        if self._attribute_word and self._attribute_word[-1] is not None and data:
+            # The element has its own text after all; keep that instead.
+            self._attribute_word[-1] = None
+        self._emit(data)
 
     def handle_entityref(self, name: str) -> None:
-        self.parts.append(html.unescape(f"&{name};"))
+        self.handle_data(html.unescape(f"&{name};"))
 
     def handle_charref(self, name: str) -> None:
-        self.parts.append(html.unescape(f"&#{name};"))
+        self.handle_data(html.unescape(f"&#{name};"))
 
 
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
@@ -215,14 +300,14 @@ def clean_definition(
 # body, so Copy/Open and every plain-text consumer are unaffected. Flags are
 # "b" (bold), "i" (italic) and "d" (dimmed/secondary).
 
-_STYLE_BOLD_TAGS = frozenset({"b", "strong", "hw", "r"})
+_STYLE_BOLD_TAGS = frozenset({"b", "strong", "hw", "r", "ci"})
 _STYLE_ITALIC_TAGS = frozenset({"i", "em"})
-_STYLE_DIM_TAGS = frozenset({"rt", "rp", "sup", "sub", "py", "gu"})
+_STYLE_DIM_TAGS = frozenset({"rt", "rp", "sup", "sub", "py", "gu", "mc"})
 _STYLE_MAX_ALIGN_CHARS = 20000
 
 
 class _StyledTextParser(_PlainTextParser):
-    """Mirror of _PlainTextParser that also records a flag set per part."""
+    """_PlainTextParser that also records a flag set per emitted part."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -232,16 +317,11 @@ class _StyledTextParser(_PlainTextParser):
     def _current(self) -> frozenset[str]:
         return self._stack[-1][1] if self._stack else frozenset()
 
-    def _emit(self, text: str, flags: frozenset[str]) -> None:
+    def _emit(self, text: str, flags: frozenset[str] = frozenset()) -> None:
         self.parts.append(text)
-        self.flags.append(flags)
+        self.flags.append(frozenset() if text == "\n" else self._current() | flags)
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        name = tag.casefold()
-        if name in self._BLOCK_TAGS:
-            self._emit("\n", frozenset())
-        if name == "li":
-            self._emit("• ", frozenset({"d"}))
+    def _open(self, name: str, values: Mapping[str, str]) -> None:
         if name in self._BLOCK_TAGS and name not in {"p", "div", "li", "section"}:
             return
         added: set[str] = set()
@@ -249,32 +329,20 @@ class _StyledTextParser(_PlainTextParser):
             added.add("b")
         if name in _STYLE_ITALIC_TAGS:
             added.add("i")
-        if name in _STYLE_DIM_TAGS:
+        if name in _STYLE_DIM_TAGS or (name == "a" and ("pg" in values or "rs" in values)):
             added.add("d")
-        values = {key.casefold(): (value or "").casefold() for key, value in attrs}
-        if values.get("color") or "color:" in values.get("style", ""):
+        lowered = {key: value.casefold() for key, value in values.items()}
+        if lowered.get("color") or "color:" in lowered.get("style", ""):
             added.add("d")
-        if values.get("class") == "grammar":
+        if lowered.get("class") == "grammar":
             added.update({"i", "d"})
         self._stack.append((name, self._current() | added))
 
-    def handle_endtag(self, tag: str) -> None:
-        name = tag.casefold()
-        if name in self._BLOCK_TAGS:
-            self._emit("\n", frozenset())
+    def _close(self, name: str) -> None:
         for index in range(len(self._stack) - 1, -1, -1):
             if self._stack[index][0] == name:
                 del self._stack[index:]
                 break
-
-    def handle_data(self, data: str) -> None:
-        self._emit(data, self._current())
-
-    def handle_entityref(self, name: str) -> None:
-        self._emit(html.unescape(f"&{name};"), self._current())
-
-    def handle_charref(self, name: str) -> None:
-        self._emit(html.unescape(f"&#{name};"), self._current())
 
 
 def _html_flags(raw: str, plain: str) -> list[set[str]] | None:
@@ -347,8 +415,10 @@ _LINE_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^(\s+.*--\s?[A-Z][^\n]*)$"), "id"),
 ]
 _INLINE_RULES: list[tuple[re.Pattern[str], str]] = [
-    # IPA between slashes, GCIDE pronunciation between backslashes.
-    (re.compile(r"(/[^/\n㐀-鿿]{1,60}/)"), "d"),
+    # IPA between slashes: either one unbroken token or text with a non-ASCII
+    # (IPA) letter, so prose such as "and/or ... and/" stays undimmed.
+    (re.compile(r"(/(?:[^/\s㐀-鿿]{1,60}|(?=[^/\n]*[^\x00-\x7f])[^/\n㐀-鿿]{1,60})/)"), "d"),
+    # GCIDE pronunciation between backslashes.
     (re.compile(r"(\\[^\\\n]{1,60}\\)"), "d"),
     # GCIDE etymology/inflection brackets.
     (re.compile(r"(\[(?:Etym|imp\.|p\. p\.|pl\.|R\.)[^\]\n]{0,200}\])"), "d"),
