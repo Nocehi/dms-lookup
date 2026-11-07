@@ -2,6 +2,10 @@
 
 ## Unreleased — standalone-first 0.8.0
 
+- Add an experimental, opt-in Magic Trackpad force-press trigger
+  (`bin/dank-force-press-watch`, `systemd/dank-force-press.service`,
+  `packaging/install-force-touch.sh`, haptic udev rule). Not installed or
+  enabled by `install-user.sh`; USB-only haptics. See `docs/force-touch.md`.
 - Make the clipboard fallback opt-in (`"selection": {"clipboard_fallback":
   true}` in `config.json`, default off). The `force-press` source never reads
   the clipboard. The capture command now receives the source name as its

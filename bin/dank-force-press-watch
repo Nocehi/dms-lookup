@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Dogfood: trigger Dank Lookup with a Magic Trackpad force press.
+
+Non-grabbing evdev reader: the cursor and clicks keep working normally.
+Rule: while the button is held, one finger's pressure must stay >= --force
+for --hold ms, and that finger must not have moved more than --max-move mm
+since the button went down (a hard drag-select is not a deep press). At that
+moment a haptic pulse is sent (needs write access to the trackpad's hidraw
+node: the "Actuator" interface over USB, the single node over Bluetooth, where
+the same report is prefixed with ID 0xF2); the lookup fires when the
+button is released (so a drag selection is finalised first).
+
+Usage:
+  dank-force-press-watch --dry-run -v   # log only, never runs lookup
+  dank-force-press-watch                # runs dank-lookup-selection
+Options: --force 160 --hold 80 --max-move 3.0 --cooldown 400 --cmd PATH
+         --no-haptic --strength 0x26C19
+Logs pressure, timing and trackpad travel only; never reads or logs text.
+Every press logs move_mm (travel before force). A press that follows a deep
+press within 1 s with < 2 mm cursor travel in between and is not itself deep
+is logged with retry=1 gap_ms= idle_mm= (misfire-retry proxy, bus design 6.1).
+"""
+import argparse, glob, os, shutil, struct, subprocess, sys, time
+import evdev
+from evdev import ecodes as E
+
+APPLE_VENDORS = {0x004C, 0x05AC}
+TRACKPADS = {0x0265, 0x0324}
+
+
+def find_device():
+    for path in evdev.list_devices():
+        try:
+            d = evdev.InputDevice(path)
+        except OSError:
+            continue  # MT2 USB interface 0 returns EPIPE on open
+        if d.info.vendor in APPLE_VENDORS and d.info.product in TRACKPADS:
+            caps = d.capabilities().get(E.EV_ABS, [])
+            if any(c == E.ABS_MT_PRESSURE for c, _ in caps):
+                return d
+        d.close()
+    return None
+
+
+HAPTIC_TAIL = bytes([0x21, 0x2B, 0x06, 0x01, 0x00, 0x16, 0x41, 0x13])
+
+
+def _has_output_0x53(sys_hidraw):
+    with open(os.path.join(sys_hidraw, "device", "report_descriptor"), "rb") as f:
+        d = f.read()
+    i, rid = 0, None
+    while i < len(d):
+        b = d[i]
+        size = (0, 1, 2, 4)[b & 3]
+        val = int.from_bytes(d[i + 1:i + 1 + size], "little") if size else 0
+        if b & 0xFC == 0x84:
+            rid = val
+        elif b & 0xFC == 0x90 and rid == 0x53:
+            return True
+        i += 1 + size
+    return False
+
+
+BUS_USB, BUS_BLUETOOTH = 0x03, 0x05
+
+
+class Haptic:
+    """Best effort: any failure just disables the pulse until next rescan.
+
+    bus is the touch device's transport (evdev info.bustype): the actuator is
+    looked for on the same transport, so a trackpad that is both plugged in
+    and paired never pulses over the link it is not using."""
+
+    def __init__(self, strength, bus=BUS_USB):
+        usb = bytes([0x53, 0x01]) + struct.pack("<I", strength) + HAPTIC_TAIL
+        # Over Bluetooth the same payload goes out behind report ID 0xF2
+        # (verified on the A3120 2026-11-06; the bare 0x53 report is accepted
+        # there but does nothing, and the descriptor declares neither ID).
+        self.report = b"\xF2" + usb if bus == BUS_BLUETOOTH else usb
+        self.bus = bus
+        self.fd = None
+        self.node = None
+        for s in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+            try:
+                with open(os.path.join(s, "device", "uevent")) as f:
+                    hid = next((l.split("=", 1)[1].strip() for l in f
+                                if l.startswith("HID_ID=")), "")
+                b, v, p = (int(x, 16) for x in hid.split(":"))
+                if p not in TRACKPADS:
+                    continue
+                if bus == BUS_BLUETOOTH:
+                    ok = b == BUS_BLUETOOTH and v == 0x004C
+                else:
+                    ok = v == 0x05AC and _has_output_0x53(s)
+                if ok:
+                    self.node = "/dev/" + os.path.basename(s)
+                    self.fd = os.open(self.node, os.O_WRONLY)
+                    return
+            except (OSError, ValueError):
+                continue
+
+    def status(self):
+        if self.fd is not None:
+            return f"haptic on {self.node} ({'bluetooth' if self.bus == BUS_BLUETOOTH else 'usb'})"
+        if self.node:
+            return f"haptic unavailable ({self.node} not writable)"
+        return "haptic unavailable (no actuator hidraw node)"
+
+    def pulse(self):
+        if self.fd is None:
+            return
+        try:
+            os.write(self.fd, self.report)
+        except OSError as e:
+            log(f"haptic write failed ({e}); disabled")
+            self.close()
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+def log(msg):
+    print(time.strftime("%H:%M:%S"), msg, flush=True)
+
+
+def run(dev, args, cmd, haptic):
+    res = dev.absinfo(E.ABS_MT_POSITION_X).resolution or 47  # units/mm
+    max_move = args.max_move * res
+    slot, slots, pressure, pos = 0, set(), {}, {}
+    btn = False
+    t_click = t_above = None
+    forced = None          # (ms from click to force, peak, x, y)
+    peak = 0
+    start = {}             # slot -> (x, y) at first frame of this press
+    move = 0.0             # max travel of the pressing finger before force
+    dragged = False
+    prev = {}              # slot -> (x, y) at previous frame, for idle travel
+    t_deep = None          # release time of the last deep press
+    idle = 0.0             # cursor-driving travel since that release
+    last_fire = 0.0
+    retry = ""
+
+    def mm(u):
+        return f"{u / res:.1f}"
+
+    for ev in dev.read_loop():
+        if ev.type == E.EV_ABS:
+            if ev.code == E.ABS_MT_SLOT:
+                slot = ev.value
+            elif ev.code == E.ABS_MT_TRACKING_ID:
+                if ev.value == -1:
+                    slots.discard(slot); pressure.pop(slot, None); pos.pop(slot, None)
+                else:
+                    slots.add(slot)
+                prev.pop(slot, None); start.pop(slot, None)
+            elif ev.code == E.ABS_MT_PRESSURE:
+                pressure[slot] = ev.value
+            elif ev.code == E.ABS_MT_POSITION_X:
+                pos.setdefault(slot, [0, 0])[0] = ev.value
+            elif ev.code == E.ABS_MT_POSITION_Y:
+                pos.setdefault(slot, [0, 0])[1] = ev.value
+        elif ev.type == E.EV_KEY and ev.code in (E.BTN_LEFT, E.BTN_MOUSE):
+            now = time.monotonic()
+            if ev.value and not btn:
+                btn, t_click, t_above, forced, peak = True, now, None, None, 0
+                start, move, dragged = {}, 0.0, False
+                retry = ""
+                if t_deep is not None:
+                    gap = int((now - t_deep) * 1000)
+                    if gap <= 1000 and idle < 2 * res:
+                        retry = f" gap_ms={gap} idle_mm={mm(idle)}"
+                    t_deep = None
+            elif not ev.value and btn:
+                btn = False
+                if forced:
+                    ms, fpeak, x, y = forced
+                    cool = (now - last_fire) * 1000 < args.cooldown
+                    tag = "COOLDOWN" if cool else ("WOULD FIRE" if args.dry_run else "FIRE")
+                    log(f"{tag}: click->force {ms} ms, peak {fpeak}, pos ({x},{y}) "
+                        f"move_mm={mm(move)}")
+                    t_deep, idle = now, 0.0
+                    if not cool:
+                        last_fire = now
+                        if not args.dry_run:
+                            subprocess.Popen([cmd, "force-press"], stdin=subprocess.DEVNULL,
+                                             stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL,
+                                             start_new_session=True)
+                else:
+                    if dragged:
+                        why = f"moved {mm(move)} mm before force"
+                    elif peak >= args.force:
+                        why = f"not held {args.hold} ms"
+                    else:
+                        why = f"below {args.force}"
+                    if args.verbose or retry:
+                        log(f"click: peak {peak} ({why}) move_mm={mm(move)}"
+                            + (f" retry=1{retry}" if retry else ""))
+        elif ev.type == E.EV_SYN and ev.code == E.SYN_REPORT:
+            if not btn and t_deep is not None:
+                for s, p in pos.items():
+                    if s in prev:
+                        idle += ((p[0] - prev[s][0]) ** 2 + (p[1] - prev[s][1]) ** 2) ** 0.5
+            prev = {s: tuple(p) for s, p in pos.items()}
+            if not btn or forced or dragged:
+                continue
+            now = time.monotonic()
+            for s, p in pos.items():
+                start.setdefault(s, tuple(p))
+            p = max(pressure.values(), default=0)
+            peak = max(peak, p)
+            if len(slots) == 1:
+                s = next(iter(slots))
+                if s in pos and s in start:
+                    x0, y0 = start[s]
+                    x, y = pos[s]
+                    move = max(move, ((x - x0) ** 2 + (y - y0) ** 2) ** 0.5)
+                    if move > max_move:
+                        dragged, t_above = True, None
+                        continue
+            if len(slots) == 1 and p >= args.force:
+                if t_above is None:
+                    t_above = now
+                if (now - t_above) * 1000 >= args.hold:
+                    s = next(iter(slots))
+                    x, y = pos.get(s, (0, 0))
+                    forced = (int((t_above - t_click) * 1000), p, x, y)
+                    haptic.pulse()
+            else:
+                t_above = None
+        if forced and btn:
+            forced = (forced[0], max(forced[1], max(pressure.values(), default=0)),
+                      forced[2], forced[3])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--force", type=int, default=160)
+    ap.add_argument("--hold", type=int, default=80, help="ms above threshold")
+    ap.add_argument("--max-move", type=float, default=3.0,
+                    help="mm of finger travel before force that voids the press")
+    ap.add_argument("--cooldown", type=int, default=400)
+    ap.add_argument("--cmd", default=os.environ.get("DANK_LOOKUP_SELECTION")
+                    or shutil.which("dank-lookup-selection"))
+    ap.add_argument("--no-haptic", action="store_true")
+    ap.add_argument("--strength", type=lambda x: int(x, 0), default=0x00026C19,
+                    help="pulse strength (u32), same on USB and Bluetooth")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args()
+    if not args.dry_run and not args.cmd:
+        sys.exit("dank-lookup-selection not found; pass --cmd PATH or use --dry-run")
+    log(f"force>={args.force} hold={args.hold}ms max-move={args.max_move}mm cooldown={args.cooldown}ms "
+        f"{'DRY RUN' if args.dry_run else 'cmd=' + args.cmd}")
+    while True:
+        dev = find_device()
+        if dev is None:
+            time.sleep(2)
+            continue
+        haptic = Haptic(args.strength, dev.info.bustype)
+        if args.no_haptic:
+            haptic.close()
+        log(f"watching {dev.path} {dev.name!r} "
+            f"res={dev.absinfo(E.ABS_MT_POSITION_X).resolution}/mm; "
+            f"{'haptic off' if args.no_haptic else haptic.status()}")
+        try:
+            run(dev, args, args.cmd, haptic)
+        except OSError as e:
+            log(f"device lost ({e}); rescanning")
+            time.sleep(1)
+        except KeyboardInterrupt:
+            return
+        finally:
+            haptic.close()
+            dev.close()
+
+
+if __name__ == "__main__":
+    main()
