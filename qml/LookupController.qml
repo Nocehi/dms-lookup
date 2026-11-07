@@ -748,12 +748,21 @@ Item {
                     }
                 }
             }
-            // Collapse runs of blank lines and drop trailing ones.
+            // Collapse runs of blank lines and drop trailing ones. A blank
+            // line before a list bullet is dropped too: HTML dictionaries end
+            // each <li> with a break, and the bullet already separates senses.
             var kept = []
             for (var m = 0; m < lines.length; ++m) {
                 var blank = lines[m].text.trim() === ""
                 if (blank && (kept.length === 0 || kept[kept.length - 1].text.trim() === ""))
                     continue
+                if (blank) {
+                    var next = m + 1
+                    while (next < lines.length && lines[next].text.trim() === "")
+                        ++next
+                    if (next < lines.length && /^\s*\u2022/.test(lines[next].text))
+                        continue
+                }
                 kept.push(lines[m])
             }
             while (kept.length > 0 && kept[kept.length - 1].text.trim() === "")
