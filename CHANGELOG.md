@@ -11,11 +11,32 @@
 - Add an experimental, opt-in Magic Trackpad force-press trigger
   (`bin/dank-force-press-watch`, `systemd/dank-force-press.service`,
   `packaging/install-force-touch.sh`, haptic udev rule). Not installed or
-  enabled by `install-user.sh`; USB-only haptics. See `docs/force-touch.md`.
+  enabled by `install-user.sh`. Haptics work over USB and Bluetooth (the
+  Bluetooth report is wrapped in report ID `0xF2`); a press that moves more
+  than 3 mm is treated as a drag and does not trigger. Thresholds (160 /
+  80 ms) are backed by natural-use margin measurements over both transports.
+  See `docs/force-touch.md`.
 - Make the clipboard fallback opt-in (`"selection": {"clipboard_fallback":
   true}` in `config.json`, default off). The `force-press` source never reads
   the clipboard. The capture command now receives the source name as its
   second argument.
+- Card redesign, measured against DMS 2.0 and macOS Look Up:
+  - blur behind the card (`Quickshell.Wayland` background effect) and DMS-style
+    buttons; Chinese UI strings; tonal 完整條目 (Open full);
+  - every exact entry is shown under a grey source heading with a hairline;
+    the pronunciation sits under the headword;
+  - dictionary styling reaches the card as text runs (bold, italic, grey) from
+    HTML dictionaries plus conservative line rules for plain ones, with
+    per-dictionary formatters for 王力, Wiktionary, GCIDE and JMdict; ordered
+    lists are numbered; hard-wrapped plain dictionaries are reflowed for
+    display only, so Copy still returns the dictionary text unchanged;
+  - mode switch moved to quiet capsules at the bottom left; Exact/Related is
+    one 相關 toggle;
+  - default size 400x420 like macOS Look Up, configurable with
+    `DANK_LOOKUP_CARD_WIDTH`/`DANK_LOOKUP_CARD_HEIGHT`; opt-in placement under
+    the pointer with `DANK_LOOKUP_PLACEMENT=pointer` (default stays centred);
+  - the full matugen palette is loaded and retried when the theme file
+    appears. See `docs/theming.md`.
 - Add a standalone Quickshell frontend with no `qs.*`/DMS imports; retain DMS
   only as an optional 1.4.6+ `daemon` theme/IPC wrapper.
 - Replace synchronous `/tmp` file polling with two-stage Quickshell IPC:
