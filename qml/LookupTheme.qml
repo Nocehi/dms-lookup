@@ -94,6 +94,8 @@ QtObject {
     readonly property real iconStroke: 2
     readonly property real progressHeight: 3
     readonly property real minChipWidth: 40
+    // Pill padding is never below the pill radius (chipHeight / 2).
+    readonly property real capsulePadding: spacingL
     readonly property real minControlWidth: 72
     readonly property real statusMaxWidth: 200
     readonly property real loadingWidth: 260
@@ -125,6 +127,9 @@ QtObject {
     // State layers (Material 3 hover/selected opacities) and text emphasis.
     readonly property real stateHover: 0.12
     readonly property real stateSelected: 0.22
+    // Quiet (neutral) capsules: the mode switch at the bottom of the card.
+    readonly property real quietHover: 0.06
+    readonly property real quietSelected: 0.10
     readonly property real textSecondary: 0.70
     readonly property real textTertiary: 0.55
     readonly property real textDisabled: 0.38

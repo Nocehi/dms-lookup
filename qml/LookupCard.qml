@@ -131,75 +131,11 @@ Item {
         }
 
         Flickable {
-            id: modeStrip
+            id: tokenStrip
             // Anchor past the pronunciation only while it shows; a height
             // binding on that Text made a binding loop.
             anchors.top: pronunciationLabel.visible ? pronunciationLabel.bottom : header.bottom
             anchors.topMargin: visible ? root.theme.gap : 0
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.leftMargin: root.theme.popoutPadding
-            anchors.rightMargin: root.theme.popoutPadding
-            height: root.controller.availableModes.length > 0 ? root.theme.controlHeight : 0
-            visible: height > 0
-            clip: true
-            contentWidth: modeRow.width
-            contentHeight: height
-            boundsBehavior: Flickable.StopAtBounds
-
-            Row {
-                id: modeRow
-                height: parent.height
-                spacing: root.theme.spacingS
-
-                Repeater {
-                    model: root.controller.availableModes
-
-                    T.Button {
-                        id: modeButton
-                        required property string modelData
-                        property var modeResult: root.controller.resultsByMode[modelData]
-                                                   || ({})
-                        property bool selected: root.controller.activeMode === modelData
-                        implicitWidth: Math.max(root.theme.minControlWidth,
-                                                modeText.implicitWidth + 2 * root.theme.spacingL)
-                        implicitHeight: root.theme.controlHeight
-                        hoverEnabled: true
-
-                        contentItem: Text {
-                            id: modeText
-                            text: modeButton.modeResult.label || modeButton.modelData
-                            color: modeButton.selected ? root.theme.on_primary
-                                                       : root.theme.on_surface
-                            font.family: root.theme.fontUi
-                            font.pixelSize: root.theme.fontSizeSmall
-                            font.weight: Font.Medium
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-
-                        background: Rectangle {
-                            radius: root.theme.radiusSmall
-                            color: modeButton.selected
-                                   ? root.theme.primary
-                                   : (modeButton.hovered
-                                      ? root.alpha(root.theme.primary, root.theme.stateHover)
-                                      : "transparent")
-                            border.color: modeButton.selected ? "transparent"
-                                                              : root.theme.borderColor
-                            border.width: modeButton.selected ? 0 : root.theme.borderWidth
-                        }
-
-                        onClicked: root.controller.applyMode(modelData)
-                    }
-                }
-            }
-        }
-
-        Flickable {
-            id: tokenStrip
-            anchors.top: modeStrip.bottom
-            anchors.topMargin: visible ? root.theme.spacingS : 0
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.leftMargin: root.theme.popoutPadding
@@ -381,6 +317,11 @@ Item {
             anchors.rightMargin: root.theme.popoutPadding
             height: root.theme.borderWidth
             color: root.theme.dividerColor
+            // The first dictionary heading draws its own hairline; a second
+            // rule right above it would double the line.
+            opacity: root.controller.phase === "ready"
+                     && root.controller.activeDisplay.sections.length > 0
+                     && root.controller.activeDisplay.sections[0].source !== "" ? 0 : 1
         }
 
         Item {
@@ -568,53 +509,130 @@ Item {
             anchors.margins: root.theme.popoutPadding
             height: root.theme.controlHeight
 
-            Row {
+            // Modes sit at the bottom as quiet capsules, the way macOS Look Up
+            // lists its sources under the entries: the definition comes first
+            // and the switch stays out of the reading path. The selected
+            // capsule is a neutral tonal fill so it never competes with the
+            // Open full button. The row scrolls sideways when it is too long.
+            Flickable {
+                id: modeStrip
                 anchors.left: parent.left
+                anchors.right: actionRow.left
+                anchors.rightMargin: root.theme.gap
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: root.theme.spacingS
-                visible: root.controller.phase === "ready"
-                         && root.controller.hasRelated()
+                height: root.theme.chipHeight
+                visible: root.controller.availableModes.length > 0
+                         || (root.controller.phase === "ready" && root.controller.hasRelated())
+                clip: true
+                contentWidth: modeRow.width
+                contentHeight: height
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.HorizontalFlick
 
-                Repeater {
-                    model: [false, true]
+                Row {
+                    id: modeRow
+                    height: parent.height
+                    spacing: root.theme.spacingXS
+
+                    Repeater {
+                        model: root.controller.availableModes
+
+                        T.Button {
+                            id: modeButton
+                            required property string modelData
+                            property var modeResult: root.controller.resultsByMode[modelData]
+                                                       || ({})
+                            property bool selected: root.controller.activeMode === modelData
+                            // Horizontal padding is at least the pill radius.
+                            implicitWidth: Math.max(root.theme.minChipWidth,
+                                                    modeText.implicitWidth
+                                                    + 2 * root.theme.capsulePadding)
+                            implicitHeight: root.theme.chipHeight
+                            hoverEnabled: true
+
+                            Accessible.name: modeText.text
+                            Accessible.checkable: true
+                            Accessible.checked: selected
+
+                            contentItem: Text {
+                                id: modeText
+                                text: modeButton.modeResult.label || modeButton.modelData
+                                color: root.theme.on_surface
+                                opacity: modeButton.selected ? 1.0 : root.theme.textSecondary
+                                font.family: root.theme.fontUi
+                                font.pixelSize: root.theme.fontSizeSmall
+                                font.weight: modeButton.selected ? Font.Medium : Font.Normal
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+
+                            background: Rectangle {
+                                radius: root.theme.radiusFull
+                                color: modeButton.selected
+                                       ? root.alpha(root.theme.on_surface, root.theme.quietSelected)
+                                       : (modeButton.hovered
+                                          ? root.alpha(root.theme.on_surface, root.theme.quietHover)
+                                          : "transparent")
+                            }
+
+                            onClicked: root.controller.applyMode(modelData)
+                        }
+                    }
+
+                    // Related results are a filter on the current mode: one
+                    // toggle capsule after a hairline instead of an
+                    // Exact/Related pair.
+                    Rectangle {
+                        visible: relationButton.visible
+                                 && root.controller.availableModes.length > 0
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: root.theme.borderWidth
+                        height: root.theme.chipHeight - 2 * root.theme.spacingXS
+                        color: root.theme.dividerColor
+                    }
 
                     T.Button {
                         id: relationButton
-                        required property bool modelData
-                        property bool selected: root.controller.showRelated === modelData
-                        implicitWidth: Math.max(root.theme.minControlWidth,
+                        property bool selected: root.controller.showRelated
+                        visible: root.controller.phase === "ready" && root.controller.hasRelated()
+                        implicitWidth: Math.max(root.theme.minChipWidth,
                                                 relationText.implicitWidth
-                                                + 2 * root.theme.spacingL)
-                        implicitHeight: root.theme.controlHeight
+                                                + 2 * root.theme.capsulePadding)
+                        implicitHeight: root.theme.chipHeight
                         hoverEnabled: true
+
+                        Accessible.name: relationText.text
+                        Accessible.checkable: true
+                        Accessible.checked: selected
 
                         contentItem: Text {
                             id: relationText
-                            text: relationButton.modelData ? root.ui("Related", "相關")
-                                                           : root.ui("Exact", "精確")
-                            color: relationButton.selected ? root.theme.on_primary
-                                                           : root.theme.on_surface
+                            text: root.ui("Related", "相關")
+                            color: root.theme.on_surface
+                            opacity: relationButton.selected ? 1.0 : root.theme.textSecondary
                             font.family: root.theme.fontUi
                             font.pixelSize: root.theme.fontSizeSmall
+                            font.weight: relationButton.selected ? Font.Medium : Font.Normal
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
                         }
 
                         background: Rectangle {
-                            radius: root.theme.radiusSmall
+                            radius: root.theme.radiusFull
                             color: relationButton.selected
-                                   ? root.theme.primary
+                                   ? root.alpha(root.theme.on_surface, root.theme.quietSelected)
                                    : (relationButton.hovered
-                                      ? root.alpha(root.theme.primary, root.theme.stateHover)
+                                      ? root.alpha(root.theme.on_surface, root.theme.quietHover)
                                       : "transparent")
                         }
 
-                        onClicked: root.controller.setRelated(modelData)
+                        onClicked: root.controller.setRelated(!root.controller.showRelated)
                     }
                 }
             }
 
             Row {
+                id: actionRow
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: root.theme.spacingS
