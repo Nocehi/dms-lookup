@@ -145,6 +145,55 @@ class WatcherRuleTest(unittest.TestCase):
         self.assertEqual(self.fire_count(press([200] * 12)), 0)
 
 
+class HapticDiscoveryTest(unittest.TestCase):
+    """Actuator lookup over a fake /sys/class/hidraw (USB and Bluetooth)."""
+
+    def setUp(self):
+        self.w = load_watcher()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+
+    def node(self, name, hid_id, descriptor=b""):
+        d = self.root / name / "device"
+        d.mkdir(parents=True)
+        (d / "uevent").write_text(f"HID_ID={hid_id}\n")
+        (d / "report_descriptor").write_bytes(descriptor)
+
+    def haptic(self, bus):
+        real_glob = self.w.glob.glob
+        opened = []
+        with mock.patch.object(self.w.glob, "glob",
+                               lambda _p: real_glob(str(self.root / "hidraw*"))), \
+             mock.patch.object(self.w.os, "open", lambda p, _f: opened.append(p) or 99):
+            h = self.w.Haptic(0x26C19, bus)
+        h.fd = None  # never close the fake fd
+        return h, opened
+
+    def test_bluetooth_prefixes_usb_report_with_f2_on_004c_node(self):
+        self.node("hidraw4", "0005:000005AC:0000AAAA")      # unrelated BT device
+        self.node("hidraw1", "0005:0000004C:00000324",       # A3120: no 0xF2 declared
+                  bytes([0x85, 0x02, 0x81, 0x02, 0x85, 0x55, 0xB1, 0x02]))
+        h, opened = self.haptic(self.w.BUS_BLUETOOTH)
+        self.assertEqual(opened, ["/dev/hidraw1"])
+        self.assertEqual(h.report.hex(" "), "f2 53 01 19 6c 02 00 21 2b 06 01 00 16 41 13")
+
+    def test_transport_comes_from_evdev_bustype(self):
+        # python-evdev's DeviceInfo has bustype, not bus (crashed on device).
+        src = WATCHER.read_text(encoding="utf-8")
+        self.assertIn("Haptic(args.strength, dev.info.bustype)", src)
+        self.assertNotIn("info.bus)", src)
+
+    def test_usb_keeps_0x53_actuator_and_ignores_bluetooth_node(self):
+        self.node("hidraw1", "0005:0000004C:00000324")
+        self.node("hidraw2", "0003:000005AC:00000324", bytes([0x85, 0x02, 0x81, 0x02]))
+        self.node("hidraw3", "0003:000005AC:00000324", bytes([0x85, 0x53, 0x91, 0x02]))
+        h, opened = self.haptic(self.w.BUS_USB)
+        self.assertEqual(opened, ["/dev/hidraw3"])
+        self.assertEqual(h.report[:2], bytes([0x53, 0x01]))
+        self.assertEqual(len(h.report), 14)
+
+
 class OptInBoundaryTest(unittest.TestCase):
     def test_default_installer_does_not_touch_force_touch(self):
         for name in ("install-user.sh", "uninstall-user.sh", "managed-files.py",
@@ -171,7 +220,9 @@ class OptInBoundaryTest(unittest.TestCase):
         rules = [l for l in UDEV.read_text(encoding="utf-8").splitlines()
                  if l.strip() and not l.startswith("#")]
         self.assertEqual(rules, ['SUBSYSTEM=="hidraw", ATTRS{idVendor}=="05ac", '
-                                 'ATTRS{idProduct}=="0324", TAG+="uaccess"'])
+                                 'ATTRS{idProduct}=="0324", TAG+="uaccess"',
+                                 'SUBSYSTEM=="hidraw", KERNELS=="0005:004C:0324.*", '
+                                 'TAG+="uaccess"'])
 
 
 class InstallerTest(unittest.TestCase):

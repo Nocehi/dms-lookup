@@ -1,6 +1,6 @@
 # Force 事件匯流設計
 
-2026-11-06。狀態：設計稿第三版（依 Nocehi 審閱修訂認領競態、多指判定、預先查詢評估，並加入第三階段的量化門檻），未寫程式，未改動 repo 或機上安裝。
+2026-11-06。狀態：設計稿第三版（依 Nocehi 審閱修訂認領競態、多指判定、預先查詢評估，並加入第三階段的量化門檻），另加第十節可行性探路；未寫程式，未改動 repo 或機上安裝。
 
 ## 零、方向與決定
 
@@ -19,7 +19,7 @@ Apple 的查詢、Quick Look、資料偵測，全靠應用回報游標下的物�
 | 項目 | 結論 | 依據 |
 |---|---|---|
 | quickshell 有通用 D-Bus QML 介面嗎 | **沒有**。`src/dbus/` 只有內部用的 Properties、ObjectManager 封裝，供 MPRIS、通知、系統匣等服務使用，無 `QML_ELEMENT` | quickshell 原始碼 `src/dbus/CMakeLists.txt`、`bus.hpp`、`properties.hpp` |
-| quickshell 能當 unix socket 客戶端嗎 | **能**。`Quickshell.Io.Socket`：`path`、`connected`、`write()`、`flush()`，繼承 `DataStream`，可配 `SplitParser` 逐行解析；另有 `SocketServer` | `src/io/socket.hpp`（編譯選項 `SOCKETS`，發行版預設開啟；**機上 0.3.2 尚未核實**） |
+| quickshell 能當 unix socket 客戶端嗎 | **能**。`Quickshell.Io.Socket`：`path`、`connected`、`write()`、`flush()`，繼承 `DataStream`，可配 `SplitParser` 逐行解析；另有 `SocketServer` | `src/io/socket.hpp`；編譯選項 `SOCKETS` 在 v0.3.2 預設開啟。機上 0.3.2 已間接核實，見 10.1 |
 | DMS 已有 socket 用法嗎 | **有**。`Services/DMSService.qml` 以 `DCommon.DSocket` 連 `DMS_SOCKET`（DMS 的 Go 後端），含斷線重連與 subscribe 協定 | DMS 原始碼 |
 | DMS Dock 是按下還是放開時啟動 App | **已經是放開時**。`DockAppButton.qml` 的左鍵動作 `handleLeftClick()` 在 `onReleased` 內執行；`onPressed` 只記錄拖曳起點並啟動 500 ms 長按計時（釘選 App 的拖曳重排） | DMS **v2.0.0 tag** 與 master 的 `quickshell/Modules/Dock/DockAppButton.qml` |
 | 其他 DMS 元件 | Qt `MouseArea.onClicked` 本身就在放開時觸發，所以多數元件天然符合；只有把動作寫在 `onPressed` 的地方要改。**尚未逐一盤點** | Qt 文件語義；盤點列為第三階段工作 |
@@ -244,7 +244,7 @@ BTN_LEFT 放開
 
 ## 八、未決事項
 
-1. 機上 quickshell 0.3.2 是否以 `SOCKETS` 編譯（`import Quickshell.Io` 後 `Socket` 是否可用）：第二階段前以一個最小 QML 測試確認。
+1. ~~機上 quickshell 0.3.2 是否以 `SOCKETS` 編譯~~：已間接核實（10.1）。第二階段開工時順手以最小 QML 測試再確認一次即可，不再是前提。
 2. DMS 修補走本機還是上游 PR（第三階段前由 Nocehi 決定）。
 3. 門檻裕度：Firm Press 驗證的樣本中，部分普通點擊峰值達 198，高於先前量得的 ≤ 148。門檻 160 加 80 ms 維持能否擋住，以 6.1 的深壓後重試率衡量；未達標則提高 `--force` 或 `--hold`。
 4. Firefox 與 Qt 程式在深壓後 PRIMARY 選取是否保留（原待辦第 3 項，仍有效）。
@@ -302,3 +302,55 @@ Nocehi 的構想真正要解決的，是「每次查詢都要動手關窗」。�
 
 1. **深壓與預先查詢只讀 PRIMARY**：`dank-lookup-selection` 增加只讀 PRIMARY 的選項（例如 `--primary-only`），匯流的後備指令與 Dank Lookup 的 `default` 角色都使用它。這應在第一階段一併完成。
 2. **快捷鍵路徑**暫時保留剪貼簿後備，因為有些程式不設 PRIMARY，而且使用者是明確地按下快捷鍵。是否連快捷鍵也移除，由 Nocehi 決定；若移除，`docs/privacy.md` 要同步修改。
+
+## 十、可行性探路（2026-11-06 晚）
+
+範圍：匯流、DMS Dock 接入、卡片內第二次深壓展開三項，只查證，不寫功能程式。機上部分為唯讀檢視 `~/src/DankMaterialShell`（`local/force-touch`）與 `~/dank-lookup`（`6bcd478`）。
+
+### 10.1 本機查證
+
+| 項目 | 結論 | 依據 |
+|---|---|---|
+| quickshell 0.3.2 有沒有 `Socket` | **有**（間接核實）。DMS 2.0 的 `NiriService.qml` 以 `DCommon.DSocket`（內含 `Quickshell.Io.Socket` + `SplitParser`）讀 niri 事件流，`DMSService.qml` 以同法連 DMS 後端。機上 DMS 正在 niri 下正常運作，若 `Socket` 型別不存在，這兩個服務的 QML 會載入失敗。上游 v0.3.2 `CMakeLists.txt` 第 57 行 `boption(SOCKETS "Unix Sockets" ON)` | DMS 原始碼；quickshell v0.3.2 原始碼 |
+| 誰當伺服器 | 匯流（Python）當伺服器，quickshell 只當客戶端，與 DMS 連 niri 的模式完全相同。不需要 `SocketServer`。`DSocket` 已處理「Socket 連線失敗後無法重撥」的 quickshell 限制（每次重連換新實例）與指數退避，可直接沿用 | `dux-qml-common` 的 `DSocket.qml` 註解 |
+| DMS 修補分支 | `local/force-touch` 仍停在 v2.0.0（`9b41329`），沒有任何修補 | `git log v2.0.0..HEAD` 為空 |
+| Dock 的輸入路徑 | `DockAppButton.qml` 一個 `MouseArea`：左鍵 `onPressed` 只在釘選 App 上記錄拖曳起點並啟動 500 ms 長按計時；`onReleased` 呼叫 `handleLeftClick()`；右鍵在 `onClicked` 呼叫 `showContextMenu()` | DMS v2.0.0 原始碼 |
+| Dock 右鍵選單 | 已列出該 App 的所有視窗（`DockContextMenu.qml` 取 `appData.allWindows`），可點選切換或關閉 | 同上 |
+| DMS 的 IPC | `DMSShellIPC.qml` 有約 30 個 `IpcHandler` target，含 `dock`；`dms ipc call <target> <fn>` 可用 | 同上 |
+| Dank Lookup 的觸發 | `dank-lookup-selection` 以 `quickshell -c dank-lookup ipc call dank-lookup prepare` 取得 id，再 `capturePrepared`（DMS 前端則走 `dms ipc dank-lookup-dms`）；卡片未啟動時自動 `--daemonize` 再重試 | `bin/dank-lookup-selection` 第 227–262 行 |
+| 卡片有沒有「展開」 | **沒有**。內文是一個 `Flickable`，視窗高度上限 `windowMaxHeight: 640`（`LookupTheme.qml` 第 161 行），超出即捲動；沒有截斷，也沒有逐段「更多」 | `qml/LookupCard.qml`、`qml/LookupTheme.qml` |
+
+### 10.2 網上查證
+
+- Quickshell 文件自 v0.1.0 起即有 `Quickshell.Io.Socket` 與 `SocketServer`（[SocketServer 文件](https://quickshell.org/docs/types/Quickshell.Io/SocketServer)）。
+- 沒有找到任何 Linux shell（quickshell、DMS、其他）消費觸控板壓力事件的先例。LinuxMagicForce、Magic-TP-extended 等都在驅動或 uinput 層自行合成點擊（見 survey 第六節），不向 GUI 廣播階段。最接近的先例反而是 DMS 自己讀 niri 事件流的做法，本設計就是照抄這個模式。
+- 結論：沒有現成方案可借，但所需的每一塊（Python 端 socket、quickshell 端 `Socket`、DMS 的 `DSocket` 封裝）都已存在並在機上運作。
+
+### 10.3 三項的最小第一步
+
+**一、匯流。** 可行，無阻擋。第一步即第六節的第一階段：以 PR #8 的 `dank-force-press-watch` 為底，加 `selectors` 事件迴圈與 `$XDG_RUNTIME_DIR/dank-force/bus.sock`，只廣播 `press`／`deep`／`release`／`cancel`，**沒有消費者**，後備指令照舊執行 `dank-lookup-selection`；附 `--monitor`。驗收：日常使用與現在無差別，`--monitor` 看得到事件。單元名稱沿用 `dank-force-press`。
+
+**二、卡片內第二次深壓展開。** 可行，而且**不必等匯流**。先以現有 IPC 做原型：
+
+1. `LookupController` 加 IPC 函式 `deepPress()`：卡片可見且游標在卡片上（卡片加 `HoverHandler`）時，進入展開狀態並回傳 `expanded`；否則回傳 `pass`。
+2. `dank-lookup-selection` 收到來源 `force-press` 時先呼叫 `deepPress`；回傳 `expanded` 即結束，不做新查詢；否則照舊查詢。監聽器不用改，觸覺照舊由監聽器發出。
+3. 代價：每次深壓多一次 `qs ipc` 往返（未量測，估計數十毫秒，發生在放開之後，不影響觸覺時機）。日後匯流第二階段再改為 `claimant` 認領。
+
+待 Nocehi 決定「展開」的意思：現況沒有截斷，展開只能是**加高卡片**（例如上限由 640 提高到螢幕高度約 85%）；若要 macOS 那樣逐段「更多」，須先做逐段摺疊，屬卡片改版的一部分。已知副作用：深壓本身會先產生一次韌體點擊，若落在卡片的按鈕上，按鈕也會被觸發；原型階段在內文區深壓即可避開。
+
+**三、DMS Dock 接入。** 可行，但**必須等匯流**，不宜用 IPC 原型。原因是時序：深壓在按住約 80 ms 後才判定，而 Dock 在放開時就執行點擊；實測深壓的 ≥160 持續時間最短約 122 ms，判定到放開可能只隔約 40 ms，`dms ipc` 每次起一個程序，趕不上放開，只能延遲所有 Dock 點擊或漏判，兩者都不可接受。匯流的推送（亞毫秒）加上 `awaitRelease` 才能乾淨處理。
+
+因此 Dock 的第一步不是寫程式，而是**開始累積第三階段門檻數據**。現行監聽器已記錄 `retry=1`，可直接統計：
+
+```sh
+journalctl --user -u dank-force-press | grep -c ': click->force'   # 深壓次數（FIRE 與 COOLDOWN）
+journalctl --user -u dank-force-press | grep -c 'retry=1'          # 深壓後重試次數
+```
+
+門檻：深壓 ≥ 100 次且重試率 ≤ 2%。動作建議：Dock 深壓 = 打開現有右鍵選單（已含視窗列表），不做 App Exposé，符合先前決定。修補要點：深壓時停掉 `longPressTimer`，否則釘選 App 上超過 500 ms 的深壓會進入拖曳重排；`onReleased` 對已認領的深壓不呼叫 `handleLeftClick()`。
+
+### 10.4 建議順序
+
+1. 立即：卡片 `deepPress()` 原型（不依賴其他兩項），同時開始統計門檻數據。
+2. 接着：匯流第一階段（無消費者）。
+3. 門檻達標後：DMS `ForceTouchService` + Dock 右鍵選單。

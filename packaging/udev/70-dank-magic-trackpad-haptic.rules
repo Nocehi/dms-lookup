@@ -1,3 +1,9 @@
-# Let the logged-in seat user write to the Magic Trackpad (USB-C, 05ac:0324)
+# Let the logged-in seat user write to the Magic Trackpad (USB-C, 0324)
 # hidraw nodes, so dank-force-press-watch can send a haptic pulse.
+#
+# USB: the hidraw node has USB ancestors with idVendor/idProduct attributes.
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="05ac", ATTRS{idProduct}=="0324", TAG+="uaccess"
+# Bluetooth: there are no USB ancestors, so ATTRS{idVendor} can never match.
+# Match the HID parent's kernel name instead: bus 0005, Apple BT vendor 004C.
+# (Same approach as linux-trackpad-driver INSTALL.md and Magic-TP-extended.)
+SUBSYSTEM=="hidraw", KERNELS=="0005:004C:0324.*", TAG+="uaccess"

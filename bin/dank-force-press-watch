@@ -5,7 +5,9 @@ Non-grabbing evdev reader: the cursor and clicks keep working normally.
 Rule: while the button is held, one finger's pressure must stay >= --force
 for --hold ms, and that finger must not have moved more than --max-move mm
 since the button went down (a hard drag-select is not a deep press). At that
-moment a haptic pulse is sent (USB only, needs write access to the trackpad's "Actuator" hidraw node); the lookup fires when the
+moment a haptic pulse is sent (needs write access to the trackpad's hidraw
+node: the "Actuator" interface over USB, the single node over Bluetooth, where
+the same report is prefixed with ID 0xF2); the lookup fires when the
 button is released (so a drag selection is finalised first).
 
 Usage:
@@ -59,11 +61,23 @@ def _has_output_0x53(sys_hidraw):
     return False
 
 
-class Haptic:
-    """Best effort: any failure just disables the pulse until next rescan."""
+BUS_USB, BUS_BLUETOOTH = 0x03, 0x05
 
-    def __init__(self, strength):
-        self.report = bytes([0x53, 0x01]) + struct.pack("<I", strength) + HAPTIC_TAIL
+
+class Haptic:
+    """Best effort: any failure just disables the pulse until next rescan.
+
+    bus is the touch device's transport (evdev info.bustype): the actuator is
+    looked for on the same transport, so a trackpad that is both plugged in
+    and paired never pulses over the link it is not using."""
+
+    def __init__(self, strength, bus=BUS_USB):
+        usb = bytes([0x53, 0x01]) + struct.pack("<I", strength) + HAPTIC_TAIL
+        # Over Bluetooth the same payload goes out behind report ID 0xF2
+        # (verified on the A3120 2026-11-06; the bare 0x53 report is accepted
+        # there but does nothing, and the descriptor declares neither ID).
+        self.report = b"\xF2" + usb if bus == BUS_BLUETOOTH else usb
+        self.bus = bus
         self.fd = None
         self.node = None
         for s in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
@@ -71,9 +85,14 @@ class Haptic:
                 with open(os.path.join(s, "device", "uevent")) as f:
                     hid = next((l.split("=", 1)[1].strip() for l in f
                                 if l.startswith("HID_ID=")), "")
-                _, v, p = hid.split(":")
-                if int(v, 16) == 0x05AC and int(p, 16) in TRACKPADS \
-                        and _has_output_0x53(s):
+                b, v, p = (int(x, 16) for x in hid.split(":"))
+                if p not in TRACKPADS:
+                    continue
+                if bus == BUS_BLUETOOTH:
+                    ok = b == BUS_BLUETOOTH and v == 0x004C
+                else:
+                    ok = v == 0x05AC and _has_output_0x53(s)
+                if ok:
                     self.node = "/dev/" + os.path.basename(s)
                     self.fd = os.open(self.node, os.O_WRONLY)
                     return
@@ -82,10 +101,10 @@ class Haptic:
 
     def status(self):
         if self.fd is not None:
-            return f"haptic on {self.node}"
+            return f"haptic on {self.node} ({'bluetooth' if self.bus == BUS_BLUETOOTH else 'usb'})"
         if self.node:
             return f"haptic unavailable ({self.node} not writable)"
-        return "haptic unavailable (no USB actuator interface)"
+        return "haptic unavailable (no actuator hidraw node)"
 
     def pulse(self):
         if self.fd is None:
@@ -226,7 +245,8 @@ def main():
     ap.add_argument("--cmd", default=os.environ.get("DANK_LOOKUP_SELECTION")
                     or shutil.which("dank-lookup-selection"))
     ap.add_argument("--no-haptic", action="store_true")
-    ap.add_argument("--strength", type=lambda x: int(x, 0), default=0x00026C19)
+    ap.add_argument("--strength", type=lambda x: int(x, 0), default=0x00026C19,
+                    help="pulse strength (u32), same on USB and Bluetooth")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -239,7 +259,7 @@ def main():
         if dev is None:
             time.sleep(2)
             continue
-        haptic = Haptic(args.strength)
+        haptic = Haptic(args.strength, dev.info.bustype)
         if args.no_haptic:
             haptic.close()
         log(f"watching {dev.path} {dev.name!r} "

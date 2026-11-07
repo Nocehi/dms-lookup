@@ -60,7 +60,7 @@ HIG 原則：按文件語義使用、一致、與視覺同步、勿濫用、偏�
 | pressure（連續） | 0–253 每觸點，可做連續映射；但 stage 1 區間（66–136）用來做變速時與普通點擊重疊，須在按住後才開始計算。 |
 | stageTransition | 可自算：(p−110)/(160−110)，用於預熱或動畫。 |
 | 拖曳中停用 stage 2 | ABS_MT_POSITION_X/Y 可得，能比照 deepClick 判斷位移。 |
-| 觸覺樣式 | 0x53 報告含 u32 強度，可用「強度 × 次數 × 間隔」自訂：單次強脈衝＝generic，弱單擊＝levelChange，兩下短脈衝＝alignment／到底。限 USB。 |
+| 觸覺樣式 | 0x53 報告含 u32 強度，可用「強度 × 次數 × 間隔」自訂：單次強脈衝＝generic，弱單擊＝levelChange，兩下短脈衝＝alignment／到底。USB 與藍牙都已在 A3120 上驗證（藍牙 2026-11-06，見 notes.md 1.4）。 |
 | 游標下的內容 | **無法得知**。Apple 的查詢、Quick Look、資料偵測都靠 App 回報游標下的物件；我們只能讀 PRIMARY 選取或聚焦視窗（niri msg）。 |
 
 ## 四、建議（依價值排序）
@@ -90,17 +90,21 @@ HIG 原則：按文件語義使用、一致、與視覺同步、勿濫用、偏�
 
 | 專案 | 做法 | 對 A3120 的參考價值 |
 |---|---|---|
-| [TrackWeight](https://github.com/KrishKrosh/TrackWeight) | 經私有 MultitouchSupport 讀壓力，當電子秤；作者稱數值即為克；須手指接觸，僅供實驗 | 低。我們的 0–253 未經砝碼校準，`hid-magicmouse` 的換算未知 |
+| [TrackWeight](https://github.com/KrishKrosh/TrackWeight) | 經私有 MultitouchSupport 讀壓力，當電子秤；作者稱數值即為克；須手指接觸，僅供實驗 | 低。我們的 0–253 未經砝碼校準，`hid-magicmouse` 的換算未知。[TidBITS 實測](https://talk.tidbits.com/t/appbits-trackweight-turns-your-trackpad-into-a-scale-sort-of/31609)：只有偵測到電容接觸才有壓力事件，手指幾乎不可能維持恆定壓力，失敗遠多於成功，稱之為「inspired hack」 |
+| [Tactile](https://github.com/Mason363/Tactile)（macOS，MIT，2026-07，[AppleVis 介紹](https://applevis.com/comment/211639)） | 讀 Accessibility tree，游標停在可點擊元素上時震一下；可選視覺提示，對象包括低視力用戶 | 觸覺作「語義」（這裏可以按）而非「確認」（已按下）。Linux 上理論可經 AT-SPI 做，但 Wayland 下背景程式難以取得全域游標位置；按第八節分工，這類判斷應由知道 hover 狀態的 GUI 層（DMS）發起，監聽器只提供觸覺服務 |
+| [LinuxMagicForce](https://github.com/Eriskii/LinuxMagicForce) | 藍牙 `0265` 觸覺守護程式；ridge haptics（手指在觸控板座標上越過設定的分隔線時震）、雙指／三指捲動紋理、拖曳按距離脈衝；雙擊時窗內提高 force 門檻 | ridge 是第六節第 1 項的前例（只作記錄）；它的分隔線是觸控板座標上固定的格線，不是 niri column 的邏輯邊界。雙擊門檻見 notes.md 2.2.1 |
+| [Magic-TP-extended](https://github.com/knespii/Magic-TP-extended)、[linux-trackpad-driver](https://github.com/aaronroquefonseca/linux-trackpad-driver) | 前者不接管點擊、藍牙寫 hidraw 震；後者完整用戶態驅動，含第二層 force 與滯後 | 壓力參考值與兩層 force 可行性，見 notes.md 2.1–2.2 |
 | [Inklet、Autograph](https://eclecticlight.co/2015/12/22/digging-deeper-into-force-touch-and-the-magic-trackpad-2/) | 觸控板改作絕對定位壓感繪圖板；邊緣做「虛擬滑桿」控制復原、縮放、筆刷大小 | 中。見 6.5 |
 | BetterTouchTool | 可自訂點擊與深壓門檻，附即時壓力檢視 | 概念同 `pressure_probe.py`；可借鏡「門檻可調＋即時顯示」做校準工具 |
 | Google Pixel 4 Firm Press | 無壓力感測器，以接觸面積推算力度 | **值得一試**：`hid-magicmouse` 亦回報 `ABS_MT_TOUCH_MAJOR/MINOR`，可與壓力併用以拉開普通點擊與深壓的距離（未驗證） |
 
 ## 六、可搬到 niri 與 DMS 的點子（附 A3120 可行性）
 
-前提：我們只有一個額外階段（普通點擊最高約 148，深壓至少約 162）；監聽器不知道游標下是什麼；觸覺限 USB。排序沿用 Nocehi 調查的投入產出比，後附評估。
+前提：我們只有一個額外階段（普通點擊最高約 148，深壓至少約 162）；監聽器不知道游標下是什麼；觸覺在 A3120 上 USB 與藍牙都可用（藍牙 2026-11-06 驗證），以下觸覺類點子不限於插線。排序沿用 Nocehi 調查的投入產出比，後附評估。
 
 1. **niri 欄寬吸附時給 `alignment` 觸覺。** 經 niri IPC 事件流監聽版面變化，碰到預設欄寬即發 0x53。
    - 可行性：硬體無障礙（不需壓力階段）。疑點在 niri 端：預設欄寬多以鍵盤切換，此時觸覺落在手不在的觸控板上，沒有意義；滑鼠互動式調寬是否會吸附預設寬度、事件流是否即時回報寬度，須先查 niri 26.04 原始碼與 `niri msg event-stream`。**2026-11-06 Nocehi 決定放棄**：欄寬與工作區切換已交還鍵盤，觸覺落在沒在動的手下面。
+   - 前例（僅記錄）：LinuxMagicForce 的 ridge haptics 已做「越線即震」，但線是觸控板座標上的固定格線；接 niri IPC 的邏輯邊界版本仍沒人做過。
 2. **DMS Dock 深壓開啟該 App 的視窗列表（App Exposé）；啟動器圖示深壓叫出快捷操作。**
    - 可行性：中。監聽器不知游標位置，需改為「監聽器只廣播 force 事件，由 DMS 依自己的 hover 狀態決定動作」。**此點已升級為整體方向**，見 [`force-event-bus-design.md`](force-event-bus-design.md)；另查證 DMS 2.0.0 的 Dock 本已在放開時才啟動 App。需改 DMS（外掛或上游）；stage 1 先於 stage 2 的衝突，由深壓在放開前把按壓標記為「已消耗」解決。
 3. **查詢支援資料偵測。** 選取若為日期、網址、追蹤號，卡片顯示相應預覽。
@@ -121,6 +125,12 @@ HIG 原則：按文件語義使用、一致、與視覺同步、勿濫用、偏�
 - [TrackWeight](https://github.com/KrishKrosh/TrackWeight)
 - [Eclectic Light: Digging deeper into Force Touch and the Magic Trackpad 2](https://eclecticlight.co/2015/12/22/digging-deeper-into-force-touch-and-the-magic-trackpad-2/)
 - [Wikipedia: Force Touch](https://en.wikipedia.org/wiki/Force_Touch)
+- [Eriskii/LinuxMagicForce](https://github.com/Eriskii/LinuxMagicForce)（2026-11-06 讀 README 與 `src/main.rs`）
+- [knespii/Magic-TP-extended](https://github.com/knespii/Magic-TP-extended)（2026-11-06 讀 README 與 `mtp-forced.py`）
+- [linux-trackpad-driver](https://github.com/aaronroquefonseca/linux-trackpad-driver)（v0.1.4；2026-11-06 讀 README、INSTALL、CHANGELOG）
+- [PATCH v2 HID: magicmouse: add haptic click configuration（patchew）](https://patchew.org/linux/20260514171524.110189-1-christian@fressl.at/)
+- [Tactile（AppleVis）](https://applevis.com/comment/211639)、[Mason363/Tactile](https://github.com/Mason363/Tactile)
+- [TidBITS Talk: TrackWeight](https://talk.tidbits.com/t/appbits-trackweight-turns-your-trackpad-into-a-scale-sort-of/31609)
 - [MacRumors: Apple Drops Force Touch Gesture in watchOS 7](https://www.macrumors.com/2020/06/23/apple-drops-force-touch-gesture-in-watchos-7/)
 
 ## 八、架構決定（2026-11-06，Nocehi 同意）
