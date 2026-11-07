@@ -135,6 +135,11 @@ Rules:
   `bin/` or `lib/`. The Wayland and DMS groups declare nothing.
 - `release_evidence.py adopt --context NEW --from OLD` carries owner-run
   evidence into a new context under the same rule.
+  Contexts from 0.8.0 and earlier (schema 1) are not bound to a commit, so
+  their owner-run evidence cannot be adopted; take it again.
+- Logs of groups that read the dictionary config (`{config}`) record its path
+  and SHA-256, so a later run on another config is visible. The dictionaries
+  themselves are not hashed.
 - Missing evidence is never backfilled: evidence from an older commit does
   not count, apart from the adoption rule above.
 - The bundle holds `source/` (`git archive` of the commit), `evidence/`

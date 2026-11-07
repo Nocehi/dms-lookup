@@ -203,6 +203,11 @@ def create_context(root: pathlib.Path, context_path: pathlib.Path, rev: str = "H
 
 def load_context(context_path: pathlib.Path) -> dict:
     context = _load_json(context_path)
+    if context.get("schema_version") == 1:
+        raise ReleaseEvidenceError(
+            "schema-1 context (0.8.0 and earlier) is not bound to a commit; its evidence "
+            "cannot be adopted, so take owner-run evidence again and record it"
+        )
     if (
         context.get("schema_version") != CONTEXT_SCHEMA_VERSION
         or context.get("kind") != "dank_lookup_release_context"
@@ -258,6 +263,9 @@ def run_group(
         f"started_utc: {_now()}",
         "",
     ]
+    if any("{config}" in arg for argv in definition["commands"] for arg in argv):
+        digest = sha256_file(config) if config.is_file() else "missing"
+        lines.insert(3, f"config: {config} sha256 {digest}")
     passed = True
     with tempfile.TemporaryDirectory(prefix="dank-lookup-release-") as temporary:
         worktree = pathlib.Path(temporary) / "source"

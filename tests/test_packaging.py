@@ -235,6 +235,24 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self.assertTrue(log.read_text(encoding="utf-8").rstrip().endswith("RUN: FAIL"))
         self.assertEqual(release_evidence.load_context(self.context_path)["evidence"], {})
 
+    def test_benchmark_logs_name_the_config_they_read(self):
+        uses_config = copy.deepcopy(self.REQUIREMENTS)
+        uses_config["automated"]["unit"]["commands"] = [["python3", "-c", "pass", "{config}"]]
+        self._write_requirements(uses_config)
+        self.commit("config user")
+        self.config.write_text('{"modes": []}', encoding="utf-8")
+        context = self.start()
+        release_evidence.run_group(self.root, self.context_path, "unit", config=self.config)
+        log = (self.root / release_evidence.session_dir(context).as_posix() / "unit.log").read_text()
+        self.assertIn(f"sha256 {hashlib.sha256(self.config.read_bytes()).hexdigest()}", log)
+
+    def test_schema_one_contexts_cannot_be_adopted(self):
+        self.start()
+        old = self.root / "tests/evidence/release/context-0.8.0.json"
+        old.write_text('{"schema_version": 1, "kind": "dank_lookup_release_context"}', encoding="utf-8")
+        with self.assertRaisesRegex(release_evidence.ReleaseEvidenceError, "take owner-run evidence again"):
+            release_evidence.adopt_manual(self.root, self.context_path, old)
+
     def test_missing_output_fails_the_group(self):
         broken = copy.deepcopy(self.REQUIREMENTS)
         broken["automated"]["bench"]["commands"] = [["python3", "-c", "pass"]]
