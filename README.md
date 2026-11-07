@@ -146,7 +146,11 @@ does not pretend to be complete Chinese or Japanese language identification.
 
 ## UI behavior
 
-- fixed/min/max popup with scrollable plain-text definitions;
+- fixed-size card (400x420 by default, configurable) with scrollable
+  definitions; each dictionary is a section with a grey source heading, and
+  dictionary bold/italic/grey styling is kept (display-only reflow never
+  changes copied text). It opens centred, or under the pointer with
+  `DANK_LOOKUP_PLACEMENT=pointer` (see `docs/theming.md`);
 - explicit source names and mode labels;
 - CJK headwords use the `Jigmo` Mincho font when installed (`ttf-jigmo`,
   CC0), otherwise `Asebi Mincho`, which also sets other heading text; set
@@ -282,6 +286,18 @@ historical evidence is never backfilled.
 Fixture sets now require an explicit config/backend; their results are reported
 per set, never collapsed into a generic historical “all passed”. See
 [`docs/json-schema.md`](docs/json-schema.md) for the current result/IPC contract.
+
+## Known limitations
+
+- Wayland gives no access to arbitrary on-screen text: select text first.
+  Primary-selection behaviour differs between applications.
+- The opt-in clipboard fallback may return stale clipboard content when
+  nothing is selected.
+- niri with optional DMS is the tested target; other compositors are untested.
+- Result quality depends on the installed dictionaries; some (for example the
+  XDICT 漢英 data) are poor and cannot be fixed here.
+- The force-press trigger is experimental and specific to the Apple Magic
+  Trackpad (A3120); it needs a udev rule installed with root.
 
 ## Privacy
 
