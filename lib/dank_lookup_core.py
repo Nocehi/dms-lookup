@@ -448,7 +448,14 @@ _SPAN_RULES: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-def _rule_flags(plain: str, flags: list[set[str]]) -> None:
+# Line rules a per-dictionary formatter may switch off (see _FORMATTERS).
+_POS_LINE_RULE = 3
+_ATTRIBUTION_LINE_RULE = len(_LINE_RULES) - 1
+
+
+def _rule_flags(
+    plain: str, flags: list[set[str]], skip_line_rules: frozenset[int] = frozenset()
+) -> None:
     for pattern, styles in _SPAN_RULES:
         for match in pattern.finditer(plain):
             for index in range(match.start(1), match.end(1)):
@@ -456,7 +463,9 @@ def _rule_flags(plain: str, flags: list[set[str]]) -> None:
                     flags[index].update(styles)
     start = 0
     for line in plain.split("\n"):
-        for pattern, styles in _LINE_RULES:
+        for number, (pattern, styles) in enumerate(_LINE_RULES):
+            if number in skip_line_rules:
+                continue
             match = pattern.search(line)
             if match:
                 italic_ok = not _HAN.search(match.group(1))
@@ -467,6 +476,188 @@ def _rule_flags(plain: str, flags: list[set[str]]) -> None:
                 for index in range(start + match.start(1), start + match.end(1)):
                     flags[index].update(styles)
         start += len(line) + 1
+
+
+# ---- Per-dictionary formatters --------------------------------------------------
+# A few plain-text sources have a house notation that the generic rules cannot
+# read safely. Their formatters add (or, for a generic rule that misfires on
+# that source, skip) style flags; like every rule they never change text.
+
+
+def _mark(flags: list[set[str]], plain: str, start: int, end: int, styles: str) -> None:
+    for index in range(start, end):
+        if plain[index] != "\n":
+            flags[index].update(styles)
+
+
+def _mark_groups(
+    pattern: re.Pattern[str], plain: str, flags: list[set[str]], styles: dict[int, str]
+) -> None:
+    for match in pattern.finditer(plain):
+        for group, style in styles.items():
+            if match.start(group) >= 0:
+                _mark(flags, plain, match.start(group), match.end(group), style)
+
+
+def _blocks(plain: str, separator: re.Pattern[str]) -> Iterable[tuple[int, int]]:
+    """(start, end) offsets of the blocks between separator matches."""
+
+    start = 0
+    for match in separator.finditer(plain):
+        if match.start() > start:
+            yield start, match.start()
+        start = match.start()
+    if start < len(plain):
+        yield start, len(plain)
+
+
+# Wiktionary (wikt-en-en): Lua template calls survive as "(lb en computing)",
+# "(senseid en Q14579)", "(tcl de Linux id=Q14579)", "{{lb|en|...}}", and
+# wikitext italics as ''X''. Entries for the same spelling in other languages
+# follow the English ones without a language name; their labels carry the
+# language code, which is how they are found and greyed.
+_WIKT_LABEL_NAMES = (
+    r"lb|lbl|label|tlb|senseid|tcl|cln|anagrams|alt form|alt|alternative form of"
+    r"|alternative spelling of|initialism of|abbreviation of|acronym of|&amp;lit|&lit"
+)
+_WIKT_LABEL = re.compile(
+    r"(\((?:" + _WIKT_LABEL_NAMES + r"|\+obj|q|qual|qualifier|gl|gloss|i|sense|non-gloss"
+    r"|[a-z]{2,3}-[a-z-]+(?: of)?):?\s[^()\n]*(?:\([^()\n]*\)[^()\n]*)*\))"
+)
+_WIKT_LINK = re.compile(r"(\((?:w:\s*|[lm] [a-z]{2,3}(?:-[a-z]{2,3})? ))([^()\n]+)(\))")
+_WIKT_BRACES = re.compile(r"(\{\{[^{}\n]*\}\})")
+_WIKT_ITALIC = re.compile(r"('')([^'\n]{1,200})('')")
+_WIKT_HASH = re.compile(r"(?:^|(?<=\s))(#)(?=\s|[A-Za-z])", re.M)
+_WIKT_COMMENT = re.compile(r"(&lt;!--.*?--&gt;|<!--.*?-->)")
+_WIKT_POS_LINE = re.compile(r"(?m)^[a-z]{1,10}\.$")
+_WIKT_LANGUAGE = re.compile(
+    r"\((?:" + _WIKT_LABEL_NAMES + r")\s+([a-z]{2,3}(?:-[a-z]{2,3})?)\b"
+    r"|\(([a-z]{2,3})-[a-z-]+[\s:]|\{\{[^|{}\n]+\|([a-z]{2,3}(?:-[a-z]{2,3})?)\|"
+)
+
+
+def _format_wiktionary(plain: str, flags: list[set[str]]) -> None:
+    _mark_groups(_WIKT_LABEL, plain, flags, {1: "id"})
+    _mark_groups(_WIKT_LINK, plain, flags, {1: "d", 3: "d"})
+    _mark_groups(_WIKT_BRACES, plain, flags, {1: "d"})
+    _mark_groups(_WIKT_ITALIC, plain, flags, {1: "d", 2: "i", 3: "d"})
+    _mark_groups(_WIKT_HASH, plain, flags, {1: "d"})
+    _mark_groups(_WIKT_COMMENT, plain, flags, {1: "d"})
+    _mark_groups(re.compile(r"(?m)^([a-z]{1,10}\.)$"), plain, flags, {1: "id"})
+    # A part-of-speech block whose labels name only other languages is
+    # another language's entry: grey all of it.
+    for start, end in _blocks(plain, _WIKT_POS_LINE):
+        codes = {
+            next(group for group in match.groups() if group)
+            for match in _WIKT_LANGUAGE.finditer(plain, start, end)
+        }
+        if codes and "en" not in codes:
+            _mark(flags, plain, start, end, "d")
+
+
+# GCIDE (dict.org Webster 1913): "Word \Pron\ (respelling), pos. [Etym.]",
+# numbered senses with (a) sub-senses, {cross references}, indented verse
+# quotations with "--Author" attributions, and ASCII accent escapes such as
+# [e^] or ["o] that are kept as written.
+_GCIDE_HEAD = re.compile(
+    r"(?m)^([^\s\\][^\\\n]{0,80}?) (\\[^\\\n]{1,80}\\)"
+    r"(?:,? ?(\((?:[^()\n]|\([^()\n]*\)){1,80}\)))?"
+    r"(?:,\s*((?:[a-z]{1,5}\.\s?){1,4}))?"
+)
+_GCIDE_BRACKET = re.compile(
+    r"(\[(?!(?:[a-z\"=.^'`~-]{1,4}|root|sum)\])(?:[^\[\]]|\[[^\[\]\n]{0,8}\]){1,600}\])"
+)
+_GCIDE_XREF = re.compile(r"(\{)([^{}]{1,80})(\})")
+_GCIDE_SUBSENSE = re.compile(r"(?m)^\s*(\([a-z]\))(?=\s)")
+_GCIDE_FIELD = re.compile(
+    r"(\((?:[A-Z][a-z]*(?:\[[^\]\n]{1,4}\][a-z]*)*\.)(?:\s?(?:&\s)?[A-Z][a-z]*\.){0,3}\))"
+)
+_GCIDE_INLINE_QUOTE = re.compile(r"(``[^`'\n]{1,300}'')")
+_GCIDE_ATTRIBUTION = re.compile(r"(?m)(--\s?[A-Z][^\n]*)$")
+_GCIDE_QUOTE_INDENT = 8
+
+
+def _format_gcide(plain: str, flags: list[set[str]]) -> None:
+    _mark_groups(_GCIDE_HEAD, plain, flags, {1: "b", 3: "d", 4: "id"})
+    _mark_groups(_GCIDE_BRACKET, plain, flags, {1: "d"})
+    for match in _GCIDE_XREF.finditer(plain):
+        line_start = plain.rfind("\n", 0, match.start()) + 1
+        leading = plain[line_start:match.start()]
+        # "{Ephemeral fly} (Zool.), one of ..." opens a sub-entry; elsewhere,
+        # including a wrapped line inside an [Etym.] bracket, braces mark a
+        # cross reference.
+        opens_entry = (leading.strip() == "" and len(leading) <= 3
+                       and "d" not in flags[match.start()])
+        inner = "b" if opens_entry else "i"
+        _mark(flags, plain, match.start(1), match.end(1), "d")
+        _mark(flags, plain, match.start(2), match.end(2), inner)
+        _mark(flags, plain, match.start(3), match.end(3), "d")
+    _mark_groups(_GCIDE_SUBSENSE, plain, flags, {1: "bd"})
+    _mark_groups(_GCIDE_FIELD, plain, flags, {1: "id"})
+    _mark_groups(_GCIDE_INLINE_QUOTE, plain, flags, {1: "id"})
+    _mark_groups(_GCIDE_ATTRIBUTION, plain, flags, {1: "id"})
+    # Verse and prose quotations are paragraphs indented past the sense text.
+    for start, end in _blocks(plain, re.compile(r"\n[ \t]*\n")):
+        paragraph = plain[start:end].lstrip("\n")
+        first = paragraph.split("\n", 1)[0]
+        if first.strip() and _indent(first) >= _GCIDE_QUOTE_INDENT:
+            _mark(flags, plain, start, end, "id")
+
+
+# JMdict (koaeH/JMdict-sdcv): headword blocks ("行₁", reading lines with
+# frequency marks) then senses "1 ▶ pos → gloss ¦ gloss ‖ 2 ▶ ...", and an
+# optional "━━━━" footnote block.
+_JMDICT_SENSE_POS = re.compile(r"▶([^→▶‖]{1,240}?)→")
+_JMDICT_LEAD_POS = re.compile(r"^([^→▶‖\n\d][^→▶‖\n]{0,160}?)\s*→")
+_JMDICT_BRACKET = re.compile(r"(\[[^\[\]\n]{1,40}\])")
+_JMDICT_MARKS = re.compile(r"(‖|(?<=\s)\*(?=\s|$)|[₀-₉]+)", re.M)
+# A sense number wrapped away from its "▶" ("‖ 2\n▶ n. → act").
+_JMDICT_NUMBER = re.compile(r"‖\s*(\d{1,3})(?=\s*▶)")
+
+
+def _format_jmdict(plain: str, flags: list[set[str]]) -> None:
+    _mark_groups(_JMDICT_SENSE_POS, plain, flags, {1: "id"})
+    _mark_groups(_JMDICT_BRACKET, plain, flags, {1: "d"})
+    _mark_groups(_JMDICT_MARKS, plain, flags, {1: "d"})
+    _mark_groups(_JMDICT_NUMBER, plain, flags, {1: "bd"})
+    footnote = plain.find("━━")
+    if footnote >= 0:
+        _mark(flags, plain, footnote, len(plain), "d")
+    else:
+        footnote = len(plain)
+    for start, end in _blocks(plain[:footnote], re.compile(r"\n[ \t\u3000]*\n")):
+        block = plain[start:end]
+        offset = start + len(block) - len(block.lstrip("\n"))
+        block = block.strip("\n")
+        if not block:
+            continue
+        if "→" not in block:
+            # Headword block: the spelling, then reading lines.
+            head_end = offset + len(block.split("\n", 1)[0])
+            _mark(flags, plain, offset, head_end, "b")
+            _mark(flags, plain, head_end, offset + len(block), "d")
+            continue
+        lead = _JMDICT_LEAD_POS.match(block)
+        if lead and "▶" not in block[: lead.end()]:
+            _mark(flags, plain, offset + lead.start(1), offset + lead.end(1), "id")
+
+
+_FORMATTERS: list[tuple[re.Pattern[str], Any, frozenset[int]]] = [
+    (re.compile(r"wikt|wiktionary", re.I), _format_wiktionary, frozenset()),
+    # GCIDE continuation lines such as "n. {Running}" are not part-of-speech
+    # tags; the head line formatter marks the real ones.
+    # Its own quotation rules replace the generic whole-line attribution rule.
+    (re.compile(r"gcide|webster", re.I), _format_gcide,
+     frozenset({_POS_LINE_RULE, _ATTRIBUTION_LINE_RULE})),
+    (re.compile(r"jmdict", re.I), _format_jmdict, frozenset()),
+]
+
+
+def _formatter_for(dictionary_name: str) -> tuple[Any, frozenset[int]]:
+    for pattern, formatter, skip in _FORMATTERS:
+        if pattern.search(dictionary_name):
+            return formatter, skip
+    return None, frozenset()
 
 
 # ---- Display layout -----------------------------------------------------------
@@ -534,13 +725,20 @@ def _layout_flags(plain: str, flags: list[set[str]]) -> None:
             flags[index].add("e")
 
 
-def style_flags(raw: str, plain: str, *, definition_format: str = "plain") -> list[set[str]]:
+def style_flags(
+    raw: str, plain: str, *, definition_format: str = "plain", dictionary_name: str = ""
+) -> list[set[str]]:
     flags: list[set[str]] | None = None
     if definition_format == "html":
         flags = _html_flags(raw, plain)
     if flags is None:
         flags = [set() for _ in plain]
-    _rule_flags(plain, flags)
+    formatter, skip = (
+        _formatter_for(dictionary_name) if definition_format != "html" else (None, frozenset())
+    )
+    _rule_flags(plain, flags, skip)
+    if formatter is not None:
+        formatter(plain, flags)
     if definition_format != "html":
         _layout_flags(plain, flags)
     # Italic CJK reads badly; show it dimmed instead.
@@ -1384,7 +1582,10 @@ def render_entries(
             preview = full[:entry_limit].rstrip() + "\n" + TRUNCATION_MARKER
         section = _section(entry, preview)
         flags = style_flags(
-            entry["_raw"], full, definition_format=entry["_definition_format"]
+            entry["_raw"],
+            full,
+            definition_format=entry["_definition_format"],
+            dictionary_name=entry["source"],
         )
         if entry_truncated:
             kept = len(preview) - len(TRUNCATION_MARKER) - 1

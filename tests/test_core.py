@@ -1485,7 +1485,9 @@ class StyleRunTests(unittest.TestCase):
         import dank_lookup_core as core
 
         plain = core.clean_definition(name, raw, definition_format=definition_format)
-        flags = core.style_flags(raw, plain, definition_format=definition_format)
+        flags = core.style_flags(
+            raw, plain, definition_format=definition_format, dictionary_name=name
+        )
         runs = core.runs_from_flags(plain, flags)
         if runs is not None:
             self.assertEqual("".join(text for text, _ in runs), plain)
@@ -1673,6 +1675,140 @@ class StyleRunTests(unittest.TestCase):
         _, runs = self.styled("[hang4,衡:hang4,恆:hang4]\n[king1 gai2,傾計:king1 gai2]")
         self.assertEqual(self.flags_of(runs, "[hang4,衡:hang4,恆:hang4]"), "d")
         self.assertEqual(self.flags_of(runs, "[king1 gai2,傾計:king1 gai2]"), "d")
+
+    # Per-dictionary formatters. Samples are cut from real entries of the
+    # installed dictionaries (2026-11-07 rendering audit).
+    WIKT = "wikt-en-en-2025-10-05"
+    GCIDE = "dictd_www.dict.org_gcide"
+    JMDICT = "org.edrdg.jmdict-jpn-eng"
+
+    def test_wiktionary_templates_are_greyed_not_removed(self):
+        raw = ("n.\n"
+               "1 (senseid en Q14579) (lb en computing strictly) The kernel created by"
+               " (w: Linus Torvalds) in 1991.\n"
+               "vb.\n"
+               "4 # (lb en transitive cricket) To catch the ball; ''especially'' as a keeper.\n"
+               "24 # {{lb|en|transitive|of a path, road(,) etc.}} To lead.\n"
+               "47 (lb en transitive) To come upon.&lt;!--take him by surprise?--&gt;")
+        plain, runs = self.styled(raw, name=self.WIKT)
+        self.assertEqual(plain, raw)
+        self.assertEqual(self.flags_of(runs, "(senseid en Q14579)"), "di")
+        self.assertEqual(self.flags_of(runs, "(lb en computing strictly)"), "di")
+        self.assertEqual(self.flags_of(runs, "(w: "), "d")
+        self.assertEqual(self.flags_of(runs, "Linus Torvalds"), "")
+        self.assertEqual(self.flags_of(runs, "especially"), "i")
+        self.assertEqual(self.flags_of(runs, "{{lb|en|transitive"), "d")
+        self.assertEqual(self.flags_of(runs, "#"), "d")
+        self.assertEqual(self.flags_of(runs, "vb."), "di")
+        self.assertEqual(self.flags_of(runs, "To lead."), "")
+        self.assertEqual(self.flags_of(runs, "&lt;"), "de")
+        self.assertEqual(self.flags_of(runs, "--take him"), "d")
+        # Without the formatter (another dictionary) the templates stay as text.
+        _, generic = self.styled(raw)
+        self.assertEqual(self.flags_of(generic, "(senseid en Q14579) (lb"), "")
+
+    def test_wiktionary_other_language_entries_are_greyed(self):
+        raw = ("n.\n"
+               "(lb en Egyptian god) An ancient Egyptian god.\n"
+               "n.\n"
+               "1 n place mat, setting\n"
+               "3 n # (lb de sport esp. Switzerland) set, match\n"
+               "n.\n"
+               "(senseid pl Egypt) (lb pl Egyptian god) (l en Set) (gl: god of chaos)\n"
+               "vb.\n"
+               "(alternative form of nn taka)\n"
+               "n.\n"
+               "a turkey")
+        _, runs = self.styled(raw, name=self.WIKT)
+        self.assertEqual(self.flags_of(runs, " An ancient Egyptian god."), "")
+        self.assertEqual(self.flags_of(runs, " n place mat, setting"), "d")
+        self.assertEqual(self.flags_of(runs, " set, match"), "d")
+        # A link to the English word does not make the Polish entry English.
+        self.assertIn("d", self.flags_of(runs, "(l en "))
+        self.assertIn("d", self.flags_of(runs, "Set)"))
+        self.assertEqual(self.flags_of(runs, "(alternative form of nn taka)"), "di")
+        # No language label: left as it is.
+        self.assertEqual(self.flags_of(runs, "a turkey"), "")
+
+    def test_gcide_head_brackets_cross_references_and_quotations(self):
+        raw = ("Ligula \\Lig\"u*la\\ (l[i^]g\"[-u]*l[.a]), n.; pl. L. {Ligul[ae]}\n"
+               "   (-l[=e]). [L., a little tongue. See\n"
+               "   {Ligule}.]\n"
+               "   1. (Bot.) See {Ligule}.\n"
+               "\n"
+               "   2. (Zo[\"o]l.)\n"
+               "      (a) The central process of the labium of insects. [See\n"
+               "          Illust. under {Labium}.] It is a tongue. [Slang]\n"
+               "\n"
+               "            I do set my bow in the cloud.         --Gen. ix. 13.\n"
+               "\n"
+               "   {Ephemeral fly} (Zo[\"o]l.), one of a group of insects; -- called\n"
+               "      also {day\n"
+               "      fly} and the larv[ae] are aquatic. ``Ephemeral popularity.'' --V. Knox.\n"
+               "      n. {Running}")
+        plain, runs = self.styled(raw, name=self.GCIDE)
+        self.assertEqual(plain, raw)
+        self.assertEqual(runs[0], ["Ligula", "b"])
+        self.assertEqual(self.flags_of(runs, "(l[i^]g"), "d")
+        self.assertEqual(self.flags_of(runs, "n."), "di")
+        self.assertEqual(self.flags_of(runs, "[L., a little tongue."), "d")
+        # Accent escapes are neither brackets nor removed.
+        self.assertEqual(self.flags_of(runs, "larv[ae] are aquatic"), "")
+        self.assertEqual(self.flags_of(runs, "(Bot.)"), "di")
+        self.assertEqual(self.flags_of(runs, "(a)"), "bd")
+        self.assertEqual(self.flags_of(runs, "Labium"), "di")
+        self.assertEqual(self.flags_of(runs, "[Slang]"), "d")
+        self.assertEqual(self.flags_of(runs, "I do set my bow"), "di")
+        self.assertEqual(self.flags_of(runs, "Ephemeral fly"), "b")
+        self.assertEqual(self.flags_of(runs, "Ligul[ae]"), "i")
+        self.assertEqual(self.flags_of(runs, "Ephemeral popularity."), "di")
+        self.assertEqual(self.flags_of(runs, "--V. Knox."), "di")
+        # A wrapped continuation that starts with "n." is not a POS tag.
+        self.assertIn(["n. ", ""], runs)
+
+    def test_gcide_cross_reference_inside_etymology_is_not_a_subentry(self):
+        raw = ("Set \\Set\\ (s[e^]t), v. t. [imp. & p. p. {Set}; p. pr. & vb. n.\n"
+               "   {Setting}.]\n"
+               "   1. To cause to sit.")
+        _, runs = self.styled(raw, name=self.GCIDE)
+        self.assertEqual(self.flags_of(runs, "Setting"), "di")
+        self.assertEqual(self.flags_of(runs, "v. t."), "di")
+
+    def test_jmdict_headwords_readings_pos_and_footnotes(self):
+        raw = ("行₁\n█ ぎょう\n\n"
+               "1  ▶  n. →   line (of  text) ¦ row ‖ 2 ▶ n. [Buddhism] →\n"
+               "carya ‖ 3 ▶ n. → samskara\n\n"
+               "　行₂\n　こう\n\n"
+               "1 ▶ n. → going ¦ trip ‖ 2\n▶  n. → act ¦ [see 行書]\n\n"
+               "　打₂\n　だ\n\n"
+               "n., count.  [sports] → hitting a ball\n\n"
+               "━━━━\n   * From Eng. 'doz'.")
+        plain, runs = self.styled(raw, name=self.JMDICT)
+        self.assertEqual(plain, raw)
+        self.assertEqual(runs[0], ["行", "b"])
+        self.assertEqual(self.flags_of(runs, "₁"), "bd")
+        self.assertEqual(self.flags_of(runs, "ぎょう"), "d")
+        self.assertEqual(self.flags_of(runs, "　行"), "b")
+        self.assertEqual(self.flags_of(runs, "こう"), "d")
+        self.assertEqual(self.flags_of(runs, " n. [Buddhism] "), "di")
+        self.assertEqual(self.flags_of(runs, " line (of  text)"), "")
+        self.assertEqual(self.flags_of(runs, "[see 行書]"), "d")
+        self.assertEqual(self.flags_of(runs, "n., count.  "), "di")
+        self.assertEqual(self.flags_of(runs, " hitting a ball"), "")
+        self.assertEqual(self.flags_of(runs, "From Eng."), "d")
+        # The sense number wrapped away from its arrow is still a number.
+        two = [run for run in runs if run[0] == "2"]
+        self.assertTrue(two and all(run[1] == "bd" for run in two))
+
+    def test_formatters_apply_through_render_entries(self):
+        import dank_lookup_core as core
+
+        rendered, _ = core.render_entries(
+            [{"dict": self.WIKT, "word": "x", "definition": "1 (lb en rare) A thing."}]
+        )
+        entry = rendered["entries"][0]
+        self.assertEqual(entry["body"], "1 (lb en rare) A thing.")
+        self.assertIn(["(lb en rare)", "di"], entry["runs"])
 
     def test_later_source_gets_a_shorter_preview_instead_of_none(self):
         import dank_lookup_core as core
