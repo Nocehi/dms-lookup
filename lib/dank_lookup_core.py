@@ -458,22 +458,26 @@ def _rule_flags(
 ) -> None:
     for pattern, styles in _SPAN_RULES:
         for match in pattern.finditer(plain):
-            for index in range(match.start(1), match.end(1)):
+            for index in range(match.start(1), min(match.end(1), len(flags))):
                 if plain[index] != "\n":
                     flags[index].update(styles)
     start = 0
     for line in plain.split("\n"):
+        if start >= len(flags):
+            break  # line rules look at one line; later lines are not kept
         for number, (pattern, styles) in enumerate(_LINE_RULES):
             if number in skip_line_rules:
                 continue
             match = pattern.search(line)
             if match:
                 italic_ok = not _HAN.search(match.group(1))
-                for index in range(start + match.start(1), start + match.end(1)):
+                for index in range(start + match.start(1),
+                                   min(start + match.end(1), len(flags))):
                     flags[index].update(s for s in styles if s != "i" or italic_ok)
         for pattern, styles in _INLINE_RULES:
             for match in pattern.finditer(line):
-                for index in range(start + match.start(1), start + match.end(1)):
+                for index in range(start + match.start(1),
+                                   min(start + match.end(1), len(flags))):
                     flags[index].update(styles)
         start += len(line) + 1
 
@@ -485,7 +489,7 @@ def _rule_flags(
 
 
 def _mark(flags: list[set[str]], plain: str, start: int, end: int, styles: str) -> None:
-    for index in range(start, end):
+    for index in range(start, min(end, len(flags))):
         if plain[index] != "\n":
             flags[index].update(styles)
 
@@ -714,7 +718,7 @@ def _layout_flags(plain: str, flags: list[set[str]]) -> None:
                 or re.search(r"[A-Za-z]-$", above.rstrip())
             ) else "w"
             newline = starts[number] - 1
-            for index in range(newline, starts[number] + _indent(line)):
+            for index in range(newline, min(starts[number] + _indent(line), len(flags))):
                 flags[index].clear()
                 flags[index].add(glue)
         else:
@@ -725,18 +729,45 @@ def _layout_flags(plain: str, flags: list[set[str]]) -> None:
             flags[match.start()].clear()
             flags[match.start()].add("l")
     for match in _ENTITY.finditer(plain):
-        for index in range(match.start(), match.end()):
+        for index in range(match.start(), min(match.end(), len(flags))):
             flags[index].add("e")
 
 
+class _KeptFlags(list):
+    """Flags for the first characters only; later characters read as unstyled.
+
+    The rules still read the whole text, so every decision (a block's
+    language, a bracket closing far away) is the same as for the whole entry,
+    but only the kept characters hold a set. Writes past the end are dropped.
+    """
+
+    def __getitem__(self, index):
+        if isinstance(index, int) and index >= len(self):
+            return set()
+        return super().__getitem__(index)
+
+
 def style_flags(
-    raw: str, plain: str, *, definition_format: str = "plain", dictionary_name: str = ""
+    raw: str,
+    plain: str,
+    *,
+    definition_format: str = "plain",
+    dictionary_name: str = "",
+    keep: int | None = None,
 ) -> list[set[str]]:
+    """Per-character style flags of ``plain``.
+
+    With ``keep``, only the first ``keep`` characters get flags (a giant
+    entry shows only its preview); they are the same as without it.
+    """
+
+    kept = len(plain) if keep is None else max(0, min(keep, len(plain)))
     flags: list[set[str]] | None = None
     if definition_format == "html":
         flags = _html_flags(raw, plain)
     if flags is None:
-        flags = [set() for _ in plain]
+        flags = [set() for _ in range(kept)]
+    flags = _KeptFlags(flags[:kept])
     formatter, skip = (
         _formatter_for(dictionary_name) if definition_format != "html" else (None, frozenset())
     )
@@ -746,28 +777,31 @@ def style_flags(
     if definition_format != "html":
         _layout_flags(plain, flags)
     # Italic CJK reads badly; show it dimmed instead.
-    for index, char in enumerate(plain):
+    for index, char in enumerate(plain[:kept]):
         if "i" in flags[index] and _HAN.match(char):
             flags[index].discard("i")
             flags[index].add("d")
-    return flags
+    return list(flags)
 
 
 def runs_from_flags(text: str, flags: list[set[str]]) -> list[list[str]] | None:
     """Group ``text`` into [text, flags] runs; None when nothing is styled."""
 
-    runs: list[list[str]] = []
+    # Collect run boundaries and slice once: appending to a run's string one
+    # character at a time is quadratic.
+    bounds: list[tuple[int, str]] = []
     styled = False
     for index, char in enumerate(text):
         key = "".join(sorted(flags[index])) if index < len(flags) else ""
         if char == "\n":
             key = "".join(sorted(flags[index] & _LAYOUT_FLAGS)) if index < len(flags) else ""
         styled = styled or key != ""
-        if runs and runs[-1][1] == key:
-            runs[-1][0] += char
-        else:
-            runs.append([char, key])
-    return runs if styled else None
+        if not bounds or bounds[-1][1] != key:
+            bounds.append((index, key))
+    if not styled:
+        return None
+    ends = [start for start, _ in bounds[1:]] + [len(text)]
+    return [[text[start:end], key] for (start, key), end in zip(bounds, ends)]
 
 
 def _configured_data_directories(
@@ -1590,6 +1624,7 @@ def render_entries(
             full,
             definition_format=entry["_definition_format"],
             dictionary_name=entry["source"],
+            keep=entry_limit if entry_truncated else None,
         )
         if entry_truncated:
             kept = len(preview) - len(TRUNCATION_MARKER) - 1

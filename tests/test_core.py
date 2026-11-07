@@ -1478,6 +1478,134 @@ class DefinitionFormatTests(unittest.TestCase):
         self.assertGreaterEqual(result["timing"]["backend_ms"], 0)
 
 
+class GiantEntryStyleTests(unittest.TestCase):
+    """A giant entry keeps flags only for its preview, with the same result."""
+
+    SAMPLES = {
+        "Example": ("set\n     adj 1: on the point of or\n            strongly disposed; "
+                    "\"fit to\n            drop\" [syn: {fit(p)},\n             {set(p)}]\n"
+                    "     2: fixed; \"a set stare\"\n     [also: {setting}]\n"
+                    "例：如：「影片中血腥火爆的畫面」\nvt. to make solid\n2. to unite\n"),
+        "dictd_www.dict.org_gcide": (
+            "Set \\Set\\ (s[e^]t), v. t. [imp. & p. p. {Set}; p. pr. & vb. n.\n"
+            "   {Setting}.] [OE. setten, AS. settan.]\n"
+            "   1. To cause to sit; to make to assume a specified position or\n"
+            "      attitude; to place.\n\n"
+            "            I do set my bow in the cloud.         --Gen. ix. 13.\n\n"),
+        "org.edrdg.jmdict-jpn-eng": (
+            "見る\n█ みる\n\n1  ▶ v. ichidan → to see ¦ to look ¦\n"
+            "to observe ‖ 2 ▶ v. ichidan → to examine ¦ to un-\npolished ¦ [see 看\n"
+            "る] ‖\n3 ▶ n. → cash\n\n"),
+        "wikt-en-en-2025-10-05": (
+            "n.\n1 (lb en countable) A part (of some items) here.\n"
+            "(senseid en Q1) 2 (&amp;lit en look up) &lt;of items&gt;\n"
+            "anagr.\n(noun form of et rebane  gen s)\n"),
+        "words.hk 粵語詞典": "名詞\n例：佢好鍾意食嘢。 (keoi5 hou2 zung1 ji3 sik6 je5)\n",
+    }
+
+    def render(self, core, name, body, *, whole, limit=4000):
+        entry = {"dict": name, "word": "w", "definition": body,
+                 "_definition_format": "plain"}
+        if not whole:
+            return core.render_entries([entry], max_entry_chars=limit)[0]
+        real = core.style_flags
+
+        def unclipped(raw, plain, **kwargs):
+            kwargs.pop("keep", None)
+            return real(raw, plain, **kwargs)
+
+        with mock.patch.object(core, "style_flags", unclipped):
+            return core.render_entries([entry], max_entry_chars=limit)[0]
+
+    def assert_same(self, core, name, body, limit=4000):
+        self.assertEqual(self.render(core, name, body, whole=False, limit=limit),
+                         self.render(core, name, body, whole=True, limit=limit))
+
+    def test_kept_flags_match_whole_entry_flags_at_every_cut(self):
+        import dank_lookup_core as core
+
+        for name, sample in self.SAMPLES.items():
+            body = sample * (3000 // len(sample) + 2)
+            # Every cut through two repetitions: inside spans, inside
+            # wrapped lines, at line starts and inside blocks.
+            for limit in range(len(sample) // 2, len(sample) * 2 + 40):
+                with self.subTest(name=name, limit=limit):
+                    self.assert_same(core, name, body, limit=limit)
+
+    def test_every_formatter_has_a_sample(self):
+        # The every-cut comparison only guards a formatter it exercises: a
+        # new formatter must come with a sample here.
+        import dank_lookup_core as core
+
+        for pattern, _formatter, _skip in core._FORMATTERS:
+            with self.subTest(formatter=pattern.pattern):
+                self.assertTrue(any(pattern.search(name) for name in self.SAMPLES))
+
+    def test_span_crossing_the_cut_keeps_its_style(self):
+        import dank_lookup_core as core
+
+        cases = [
+            ("dictd_www.dict.org_gcide",
+             "[Etym.: imp. & p. p. {Set}; and a long tail "
+             + "of inflection notes " * 12 + "]"),
+            ("WordNet", "[syn: " + "{fit(p)}, {set(p)}, " * 25 + "{last}]"),
+        ]
+        limit = 4000
+        filler = "   1. To cause to sit; to place.\n"
+        for name, span in cases:
+            with self.subTest(name=name):
+                head = filler * ((limit - 60) // len(filler))
+                head += " " * (limit - 60 - len(head))
+                body = head + span + "\n" + filler * 4000
+                self.assert_same(core, name, body, limit)
+                runs = self.render(core, name, body, whole=False)["entries"][0]["runs"]
+                self.assertTrue(any(span[:12] in text and "d" in flags
+                                    for text, flags in runs), runs[-3:])
+
+    def test_block_decided_far_past_the_cut_keeps_its_style(self):
+        import dank_lookup_core as core
+
+        limit = 4000
+        far = "x" * 50000
+        cases = [
+            # The English label that keeps this block undimmed comes long
+            # after the cut.
+            ("wikt-en-en-2025-10-05",
+             "n.\n1 (lb fr rare) " + "word " * 1000 + far + " (lb en rare) end\n"),
+            # The arrow that makes this a sense block, not a headword block.
+            ("org.edrdg.jmdict-jpn-eng",
+             "見る\n" + "みる " * 2000 + far + " → to see\n"),
+            # A words.hk example whose reading closes the line far away.
+            ("words.hk 粵語詞典",
+             "名詞\n例：" + "佢好鍾意食嘢" * 1000 + far + " (keoi5 hou2)\n"),
+        ]
+        for name, body in cases:
+            with self.subTest(name=name):
+                self.assertGreater(len(body), limit + 40000)
+                self.assert_same(core, name, body, limit)
+
+    def test_giant_entry_keeps_flags_for_the_preview_only(self):
+        import dank_lookup_core as core
+
+        body = "x" * (4 * 1024 * 1024)
+        kept = []
+        real = core.style_flags
+
+        def spy(raw, plain, **kwargs):
+            flags = real(raw, plain, **kwargs)
+            kept.append(len(flags))
+            return flags
+
+        with mock.patch.object(core, "style_flags", spy):
+            rendered, _ = core.render_entries(
+                [{"dict": "GiantDict", "word": "giant", "definition": body,
+                  "_definition_format": "plain"}],
+                max_entry_chars=256,
+            )
+        self.assertTrue(rendered["truncated"])
+        self.assertEqual(kept, [256])
+
+
 class StyleRunTests(unittest.TestCase):
     """Display styling never changes text and only marks reliable patterns."""
 

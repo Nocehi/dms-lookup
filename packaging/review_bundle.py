@@ -646,15 +646,31 @@ def validate_evidence_content(evidence_by_group: dict[str, list[pathlib.Path]]) 
     giant_reports = [
         _load_json(path) for path in evidence_by_group["giant_rss"]
     ]
+    # Schema 2 judges RSS against the CPython string size of each text kind
+    # and records the UTF-8-based ratio and the change of definition.
+    giant_kinds = {"ascii", "cjk", "ascii_ipa", "ascii_astral"}
     if not any(
-        report.get("summary", {}).get("correctness_pass") is True
+        report.get("schema_version") == 2
+        and report.get("summary", {}).get("correctness_pass") is True
         and report.get("summary", {}).get("owner_approved") is True
         and report.get("summary", {}).get("rss_candidate_pass") is True
-        and {sample.get("size_mib") for sample in report.get("raw_samples", [])}
-        == {1, 8, 32}
+        and bool(report.get("threshold_definition"))
+        and bool(report.get("previous_threshold_definition"))
+        and {
+            (sample.get("kind"), sample.get("size_mib"))
+            for sample in report.get("raw_samples", [])
+        }
+        == {(kind, size) for kind in giant_kinds for size in (1, 8, 32)}
+        and all(
+            "utf8_ratio" in report.get("by_kind", {}).get(kind, {})
+            for kind in giant_kinds
+        )
         for report in giant_reports
     ):
-        raise BundleError("giant RSS evidence lacks owner-approved passing 1/8/32 MiB samples")
+        raise BundleError(
+            "giant RSS evidence lacks owner-approved passing 1/8/32 MiB samples "
+            "for every text kind"
+        )
 
     wayland_reports = [
         _load_json(path) for path in evidence_by_group["wayland_owner"]

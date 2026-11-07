@@ -253,7 +253,18 @@ instead of reading a selection, and reports only
 `first_qml_frame_tick_ms`/`result_qml_frame_tick_ms` proxy distributions. Its
 JSON marks `offscreen=true` and `proxy=true`, retains every raw sample/failure,
 and derives p50/p95/p99 from those arrays. It is not visible/presented-frame or
-selection-to-visible timing. `tests/verify_wayland_presentation.py` separately
+selection-to-visible timing. Known gap: the socket strategy in
+`benchmark_lookup.py` uses an in-process client, so it does not include the
+`dank-lookup backend-request` process the card starts for every lookup (about
+70 ms on the reference machine before the lookup core was imported lazily);
+compare later architectures against a measurement of that real path.
+`tests/benchmark_giant_entry_memory.py` measures 1/8/32 MiB entries (sizes in
+UTF-8 bytes) of four kinds: ASCII, pure CJK, ASCII with one IPA character and
+ASCII with one astral character. Since 2026-11-07 the RSS gate compares the
+32-minus-1 MiB RSS growth with the growth of the entry's CPython string size
+(`str_ratio`); the earlier basis, UTF-8 input size (`utf8_ratio`), is still
+recorded for every kind but not judged, and the report states both
+definitions. `tests/verify_wayland_presentation.py` separately
 records real-Wayland owner pass/fail; without compositor timestamp evidence it
 emits no presentation latency. Default runtime writes no telemetry. Offscreen
 Quickshell IPC may need to run outside a filesystem/socket sandbox.
@@ -296,6 +307,14 @@ per set, never collapsed into a generic historical “all passed”. See
 - niri with optional DMS is the tested target; other compositors are untested.
 - Result quality depends on the installed dictionaries; some (for example the
   XDICT 漢英 data) are poor and cannot be fixed here.
+- Entry text is held as a Python string, which CPython stores at the width
+  of its widest character: an entry that is mostly ASCII but contains one IPA
+  character takes about 2x its UTF-8 file size in memory, and one emoji or
+  CJK extension character about 4x. Giant entries are therefore larger in
+  memory than their dictionary size suggests. Pure CJK is the worst case
+  for the giant-entry gate: its string is smaller than its UTF-8 size, so a
+  UTF-8 copy alive at the same time (for example sdcv's JSON output before
+  it is parsed, which the benchmark does not cover) weighs about 1.5x more.
 - The force-press trigger is experimental and specific to the Apple Magic
   Trackpad (A3120); it needs a udev rule installed with root.
 

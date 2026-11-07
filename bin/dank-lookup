@@ -32,7 +32,9 @@ def _find_libdir() -> pathlib.Path:
 LIB_DIR = _find_libdir()
 sys.path.insert(0, str(LIB_DIR))
 
-from dank_lookup_core import lookup  # noqa: E402
+# dank_lookup_core is imported where a command looks something up: the card
+# calls backend-request on every lookup, and that path only forwards a frame to
+# the resident service, so it should not pay for importing the lookup core.
 from dank_lookup_runtime import (  # noqa: E402
     BACKEND_START_LOCK_NAME,
     MAX_REQUEST_FRAME_BYTES,
@@ -81,6 +83,8 @@ def _lookup_command(args: argparse.Namespace) -> int:
         print(f"invalid lookup request: {exc}", file=sys.stderr)
         return 2
     if args.retain_runtime:
+        from dank_lookup_core import lookup
+
         result, vault = lookup(
             query,
             config_path=args.config,
@@ -180,6 +184,8 @@ def _open_ref_command(args: argparse.Namespace) -> int:
         query = payload.decode("utf-8").strip()
         if not query:
             raise ValueError("query is empty")
+        from dank_lookup_core import lookup
+
         _result, vault = lookup(
             query,
             config_path=args.config,
@@ -217,6 +223,8 @@ def _backend_handler(default_config: str | None):
         sequence = int(envelope["sequence"])
         if cancel_event.is_set():
             return {"request_id": request_id, "sequence": sequence, "status": "cancelled"}
+        from dank_lookup_core import lookup
+
         result, _vault = lookup(
             str(envelope.get("query", "")),
             config_path=envelope.get("config") or default_config,

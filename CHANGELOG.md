@@ -23,6 +23,17 @@
   true}` in `config.json`, default off). The `force-press` source never reads
   the clipboard. The capture command now receives the source name as its
   second argument.
+- Giant entries: style flags are kept only for the preview (every rule still
+  reads the whole text, so the preview looks the same). A 32 MiB entry went
+  from about 7.45 GiB RSS and 14.5 s to under 100 MiB and a few seconds; Open
+  full on an oversized entry, which re-runs the lookup, benefits too. The
+  giant-entry benchmark now covers ASCII, CJK, IPA and astral text and judges
+  RSS against the CPython string size (UTF-8 ratios are still recorded).
+- `dank-lookup backend-request`, run for every card lookup, no longer imports
+  the lookup core.
+- The pointer-placement overlay lives in `qml/PointerOverlay.qml` and is loaded only with
+  `DANK_LOOKUP_PLACEMENT=pointer`, so platforms without layer shell (and the
+  offscreen QML tests) load the default centred card again.
 - Card redesign, measured against DMS 2.0 and macOS Look Up:
   - blur behind the card (`Quickshell.Wayland` background effect) and DMS-style
     buttons; Chinese UI strings; tonal 完整條目 (Open full);

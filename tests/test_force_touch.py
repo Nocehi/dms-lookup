@@ -268,7 +268,13 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(self.unit.read_bytes(), UNIT.read_bytes())
         self.assertTrue(os.access(self.bin, os.X_OK))
         self.assertFalse(any("enable" in c for c in self.systemctl_calls()))
-        self.assertIn("sudo install -m 644", out)
+        # The udev hint depends on the host's /etc, which the test cannot
+        # redirect: it is printed only while the rule is missing or differs.
+        installed = pathlib.Path("/etc/udev/rules.d") / UDEV.name
+        if installed.exists() and installed.read_bytes() == UDEV.read_bytes():
+            self.assertNotIn("sudo install -m 644", out)
+        else:
+            self.assertIn("sudo install -m 644", out)
 
     def test_enable_and_backup_of_changed_file(self):
         self.bin.write_text("old watcher\n")
