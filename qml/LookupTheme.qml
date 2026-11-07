@@ -177,6 +177,11 @@ QtObject {
     readonly property real windowMinHeight: 280
     readonly property real windowMaxWidth: 760
     readonly property real windowMaxHeight: 640
+    // Pointer placement: distance from the pointer to the card edge, distance
+    // kept from the screen edge, and how long to wait for the pointer position.
+    readonly property real pointerGap: spacingXL
+    readonly property real screenMargin: spacingL
+    readonly property int pointerWaitMs: 120
     readonly property int appearDuration: 170
     readonly property int loadingSweepDuration: 220
 
