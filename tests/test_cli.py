@@ -157,6 +157,16 @@ class CliTests(unittest.TestCase):
             timeout=TEST_PROCESS_DEADLINE_SECONDS,
         )
 
+    def test_cli_start_does_not_import_the_lookup_core(self):
+        # backend-request runs on every card lookup and only forwards a frame;
+        # importing the lookup core there cost tens of milliseconds per lookup.
+        run = subprocess.run(
+            [sys.executable, "-X", "importtime", str(CLI), "--help"],
+            capture_output=True, text=True, timeout=TEST_PROCESS_DEADLINE_SECONDS,
+        )
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        self.assertNotIn("dank_lookup_core", run.stderr)
+
     def test_legacy_backend_adapter_accepts_bounded_stdin(self):
         query = b"adapter private query"
         result = self.run_backend("--stdout", "--stdin", input_bytes=query)
