@@ -519,6 +519,10 @@ def _blocks(plain: str, separator: re.Pattern[str]) -> Iterable[tuple[int, int]]
 _WIKT_LABEL_NAMES = (
     r"lb|lbl|label|tlb|senseid|tcl|cln|anagrams|alt form|alt|alternative form of"
     r"|alternative spelling of|initialism of|abbreviation of|acronym of|&amp;lit|&lit"
+    # Form-of templates: "(noun form of et rebane gen s)", "(plural of en x)".
+    r"|(?:[a-z]+ ){0,2}(?:form|forms|plural|inflection|tense|participle|comparative"
+    r"|superlative|singular|spelling|genitive|dative|accusative|nominative|diminutive"
+    r"|feminine|masculine|contraction|clipping|synonym) of"
 )
 _WIKT_LABEL = re.compile(
     r"(\((?:" + _WIKT_LABEL_NAMES + r"|\+obj|q|qual|qualifier|gl|gloss|i|sense|non-gloss"
