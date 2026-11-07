@@ -1538,6 +1538,155 @@ class StyleRunTests(unittest.TestCase):
         self.assertEqual(entry["body"], "[hao3] good | proper")
         self.assertEqual("".join(text for text, _ in entry["runs"]), entry["body"])
 
+    def test_wangli_attribute_text_is_kept(self):
+        raw = ('<link href="王力.css" rel="stylesheet"><tou><hw>春</hw>'
+               '<a pg href="bword://WL0429">429</a><a rs="5" href="bword://⽇">⽇</a></tou>'
+               '<yin><py><a href="bword://chun#1">chūn</a></py><gu w="春0"><MC><Mi>tsyh</Mi>'
+               '<Mf>win</Mf></MC>昌脣切。</gu></yin>'
+               '<p n="❶">春季。<z><i>荀子</i>：“<w w="春"></w>耕，夏耘。”</z>'
+               '<ci>春秋</ci>指史書。</p><div t="備考">通“蠢”。</div>')
+        plain, runs = self.styled(raw, "html", name="王力古漢語字典 Mastameta")
+        self.assertIn("“春耕，夏耘。”", plain)
+        self.assertIn("春 429 ⽇\n", plain)
+        self.assertIn("chūn tsyhwin昌脣切。", plain)
+        self.assertIn("❶ 春季。", plain)
+        self.assertIn("備考 通“蠢”。", plain)
+        self.assertEqual(self.flags_of(runs, "❶"), "bd")
+        self.assertEqual(self.flags_of(runs, "429"), "d")
+        self.assertEqual(self.flags_of(runs, "春秋"), "b")
+        quote = [run for run in runs if run[0].endswith("：“")][0]
+        self.assertEqual(runs[runs.index(quote) + 1], ["春", "b"])
+
+    def test_attribute_word_does_not_duplicate_element_text(self):
+        plain, _ = self.styled('<w w="春">春</w>耕', "html")
+        self.assertEqual(plain, "春耕")
+
+    def test_ordered_lists_are_numbered_without_blank_lines(self):
+        plain, runs = self.styled("<ol><li>甲</li><li>乙</li></ol><ul><li>丙</li></ul>"
+                                  '<ol style="list-style-type:lower-alpha"><li>丁</li></ol>', "html")
+        self.assertEqual(plain, "1. 甲\n2. 乙\n• 丙\na. 丁")
+        self.assertEqual(self.flags_of(runs, "2. "), "bd")
+        self.assertEqual(self.flags_of(runs, "• "), "d")
+
+    def test_slash_rule_dims_ipa_but_not_and_or_prose(self):
+        _, runs = self.styled("unintended, and/or unexpected, but discovery and/or learning")
+        self.assertEqual(runs, [])
+        _, runs = self.styled("serendipity /ˌsɛɹ.ənˈdɪp.ɪ.ti/, look up /lʊk ʌp/")
+        self.assertEqual(self.flags_of(runs, "/ˌsɛɹ.ənˈdɪp.ɪ.ti/"), "d")
+        self.assertEqual(self.flags_of(runs, "/lʊk ʌp/"), "d")
+
+    def shown(self, runs):
+        import html
+
+        out = []
+        for text, flags in runs:
+            if "w" in flags:
+                text = " "
+            elif "j" in flags:
+                text = ""
+            elif "l" in flags:
+                text = "\n"
+            elif "e" in flags:
+                text = html.unescape(text)
+            out.append(text)
+        return "".join(out)
+
+    def test_hanging_indent_is_reflowed_for_display_only(self):
+        raw = ("Set \\Set\\ (s[e^]t), v. t. [imp. & p. p. {Set}; p. pr. & vb. n.\n"
+               "   {Setting}.]\n"
+               "   1. To cause to sit; to make to assume a specified position or\n"
+               "      attitude; to place.\n"
+               "\n"
+               "            I do set my bow in the cloud.         --Gen. ix. 13.\n"
+               "\n"
+               "            Men in their loose, unguarded hours they take;\n"
+               "            Not that themselves are wise, but others weak.\n"
+               "                                                  --Pope.\n"
+               "   2. Hence, to attach.")
+        plain, runs = self.styled(raw)
+        self.assertEqual(plain, raw)
+        self.assertEqual(self.shown(runs), (
+            "Set \\Set\\ (s[e^]t), v. t. [imp. & p. p. {Set}; p. pr. & vb. n. {Setting}.]\n"
+            "   1. To cause to sit; to make to assume a specified position or attitude; to place.\n"
+            "\n"
+            "            I do set my bow in the cloud.         --Gen. ix. 13.\n"
+            "\n"
+            "            Men in their loose, unguarded hours they take;\n"
+            "            Not that themselves are wise, but others weak.\n"
+            "                                                  --Pope.\n"
+            "   2. Hence, to attach."))
+        # The inflection bracket is dimmed across the wrapped line.
+        self.assertEqual(self.flags_of(runs, "{Setting}.]"), "d")
+
+    def test_wordnet_senses_reflow_and_style(self):
+        raw = ("set\n"
+               "     adj 1: on the point of or\n"
+               "            strongly disposed; \"fit to\n"
+               "            drop\" [syn: {fit(p)},\n"
+               "             {set(p)}]\n"
+               "     2: fixed; \"a set stare\"\n"
+               "     [also: {setting}]")
+        plain, runs = self.styled(raw)
+        self.assertEqual(self.shown(runs), (
+            "set\n"
+            "     adj 1: on the point of or strongly disposed; \"fit to drop\" "
+            "[syn: {fit(p)}, {set(p)}]\n"
+            "     2: fixed; \"a set stare\"\n"
+            "     [also: {setting}]"))
+        self.assertEqual(self.flags_of(runs, "adj"), "di")
+        self.assertEqual(self.flags_of(runs, "1"), "bd")
+        self.assertEqual(self.flags_of(runs, "2"), "bd")
+        self.assertEqual(self.flags_of(runs, "{set(p)}]"), "d")
+        self.assertEqual(self.flags_of(runs, '"a set stare"'), "d")
+
+    def test_jmdict_senses_break_at_double_bar(self):
+        raw = ("見る\n█ みる\n\n"
+               "1  ▶ v. ichidan → to see ¦ to look ¦\n"
+               "to observe ‖ 2 ▶ v. ichidan → to examine ¦ to un-\n"
+               "polished ¦ [see 看\n"
+               "る] ‖\n"
+               "3 ▶ n. → cash")
+        plain, runs = self.styled(raw)
+        self.assertEqual(self.shown(runs), (
+            "見る\n█ みる\n\n"
+            "1  ▶ v. ichidan → to see ¦ to look ¦ to observe\n"
+            "‖ 2 ▶ v. ichidan → to examine ¦ to un-polished ¦ [see 看る]\n"
+            "‖ 3 ▶ n. → cash"))
+        self.assertEqual(self.flags_of(runs, "2"), "bd")
+        # A separator at the end of a wrapped line is dimmed too.
+        self.assertEqual(self.flags_of(runs, " ¦\n"[:2]), "d")
+
+    def test_html_sources_are_not_reflowed(self):
+        _, runs = self.styled("<p>a</p>\n   b", "html")
+        self.assertFalse(any(set(flags) & set("wjl") for _, flags in runs))
+
+    def test_plain_entities_are_decoded_for_display(self):
+        plain, runs = self.styled("1 (&amp;lit en look up) &lt;of items&gt;")
+        self.assertEqual(plain, "1 (&amp;lit en look up) &lt;of items&gt;")
+        self.assertEqual(self.shown(runs), "1 (&lit en look up) <of items>")
+
+    def test_more_pos_and_han_variant_readings_are_styled(self):
+        _, runs = self.styled("a. 朝生暮死\nvb. to set\nanagr.")
+        self.assertEqual(self.flags_of(runs, "a."), "di")
+        self.assertEqual(self.flags_of(runs, "vb."), "di")
+        self.assertEqual(self.flags_of(runs, "anagr."), "di")
+        _, runs = self.styled("[hang4,衡:hang4,恆:hang4]\n[king1 gai2,傾計:king1 gai2]")
+        self.assertEqual(self.flags_of(runs, "[hang4,衡:hang4,恆:hang4]"), "d")
+        self.assertEqual(self.flags_of(runs, "[king1 gai2,傾計:king1 gai2]"), "d")
+
+    def test_later_source_gets_a_shorter_preview_instead_of_none(self):
+        import dank_lookup_core as core
+
+        rendered, _ = core.render_entries(
+            [{"dict": name, "word": "x", "definition": "w " * 3000} for name in "ABC"]
+        )
+        entries = rendered["entries"]
+        self.assertEqual([entry["source"] for entry in entries], ["A", "B", "C"])
+        self.assertTrue(entries[2]["truncated"])
+        self.assertLessEqual(len(rendered["body"]), 12000)
+        for entry in entries:
+            self.assertEqual("".join(text for text, _ in entry["runs"]), entry["body"])
+
     def test_truncated_preview_runs_match_preview_text(self):
         import dank_lookup_core as core
 
