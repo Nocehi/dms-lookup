@@ -12,6 +12,9 @@ import sys
 import time
 from typing import Mapping
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from source_identity import INSTALLED_SOURCE, installed_source  # noqa: E402
+
 
 class WaylandVerificationError(RuntimeError):
     pass
@@ -54,6 +57,7 @@ def build_record(
     loading_presented_ns: int | None = None,
     result_presented_ns: int | None = None,
     require_socket: bool = True,
+    tested_source: dict[str, object] | None = None,
 ) -> dict[str, object]:
     environment_record = validate_wayland_environment(
         environment,
@@ -76,6 +80,7 @@ def build_record(
             "result_presented": result_pass,
             "pass": loading_pass and result_pass,
         },
+        "tested_source": tested_source,
         "presentation_timestamp_evidence": timestamp_source is not None,
         "clock": {
             "recorder": "time.monotonic_ns",
@@ -115,6 +120,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trigger-ns", type=int)
     parser.add_argument("--loading-presented-ns", type=int)
     parser.add_argument("--result-presented-ns", type=int)
+    parser.add_argument(
+        "--installed-source",
+        type=pathlib.Path,
+        default=INSTALLED_SOURCE,
+        help="written by install-user.sh; names the commit of the installed card",
+    )
     args = parser.parse_args(argv)
     try:
         record = build_record(
@@ -126,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             trigger_ns=args.trigger_ns,
             loading_presented_ns=args.loading_presented_ns,
             result_presented_ns=args.result_presented_ns,
+            tested_source=installed_source(args.installed_source),
         )
     except WaylandVerificationError as exc:
         print(f"WAYLAND_PRESENTATION: FAIL: {exc}", file=sys.stderr)

@@ -8,8 +8,12 @@ import hashlib
 import json
 import math
 import pathlib
+import sys
 from collections import defaultdict
 from typing import Any, Iterable
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from source_identity import checkout_source  # noqa: E402
 
 
 CANDIDATE_TIMEOUTS_MS = (250, 350, 500, 750, 1000, 1500, 2000)
@@ -184,6 +188,7 @@ def generate(paths: list[pathlib.Path]) -> dict[str, Any]:
         "production_default_approved": False,
         "approved_primary_timeout_ms": None,
         "approved_clipboard_timeout_ms": None,
+        "tested_source": checkout_source(pathlib.Path(__file__).resolve().parent.parent),
     }
 
 

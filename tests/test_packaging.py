@@ -48,6 +48,13 @@ assert EVIDENCE_SPEC is not None and EVIDENCE_SPEC.loader is not None
 release_evidence = importlib.util.module_from_spec(EVIDENCE_SPEC)
 EVIDENCE_SPEC.loader.exec_module(release_evidence)
 
+IDENTITY_SPEC = importlib.util.spec_from_file_location(
+    "source_identity", ROOT / "tests/source_identity.py"
+)
+assert IDENTITY_SPEC is not None and IDENTITY_SPEC.loader is not None
+source_identity = importlib.util.module_from_spec(IDENTITY_SPEC)
+IDENTITY_SPEC.loader.exec_module(source_identity)
+
 SDCV_PROBE_SPEC = importlib.util.spec_from_file_location(
     "probe_sdcv_stdin", ROOT / "tests/probe_sdcv_stdin.py"
 )
@@ -84,7 +91,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 "outputs": ["bench.json"],
             },
         },
-        "manual": {"owner": ["tests/evidence/release/owner/*.json"]},
+        "manual": {"owner": {"patterns": ["tests/evidence/release/owner/*.json"]}},
         "decisions": {},
     }
 
@@ -130,10 +137,22 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 )
             )
 
-    def record_owner(self, context_path: pathlib.Path | None = None, name: str = "a.json") -> pathlib.Path:
-        path = self.root / "tests/evidence/release/owner" / name
+    def owner_file(
+        self, name: str = "a.json", *, commit: str | None = None, uncommitted: bool = False,
+        directory: str = "owner",
+    ) -> pathlib.Path:
+        path = self.root / "tests/evidence/release" / directory / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('{"pass": true}\n', encoding="utf-8")
+        source = {
+            "origin": "installed",
+            "commit": commit or self._git("rev-parse", "HEAD"),
+            "uncommitted_changes": uncommitted,
+        }
+        path.write_text(json.dumps({"pass": True, "tested_source": source}) + "\n", encoding="utf-8")
+        return path
+
+    def record_owner(self, context_path: pathlib.Path | None = None, name: str = "a.json") -> pathlib.Path:
+        path = self.owner_file(name)
         release_evidence.record_manual(self.root, context_path or self.context_path, "owner", [path])
         return path
 
@@ -294,6 +313,70 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 with self.assertRaisesRegex(review_bundle.BundleError, "run probe"):
                     review_bundle.check_decisions({"sdcv": found}, decisions)
 
+    def test_manual_evidence_must_name_the_commit_it_measured(self):
+        self.start()
+        bare = self.root / "tests/evidence/release/owner/old-0.8.0.json"
+        bare.parent.mkdir(parents=True, exist_ok=True)
+        bare.write_text('{"pass": true}\n', encoding="utf-8")
+        with self.assertRaisesRegex(release_evidence.ReleaseEvidenceError, "does not name"):
+            release_evidence.record_manual(self.root, self.context_path, "owner", [bare])
+        dirty = self.owner_file("dirty.json", uncommitted=True)
+        with self.assertRaisesRegex(release_evidence.ReleaseEvidenceError, "uncommitted"):
+            release_evidence.record_manual(self.root, self.context_path, "owner", [dirty])
+
+    def test_manual_evidence_of_an_older_install_is_rejected_after_code_changes(self):
+        old = self._git("rev-parse", "HEAD")
+        (self.root / "app.py").write_text("print('v2')\n", encoding="utf-8")
+        self.commit("code change, not reinstalled")
+        self.start()
+        stale = self.owner_file("stale.json", commit=old)
+        with self.assertRaisesRegex(release_evidence.ReleaseEvidenceError, "app.py"):
+            release_evidence.record_manual(self.root, self.context_path, "owner", [stale])
+
+    def test_manual_evidence_of_an_older_install_counts_across_documentation(self):
+        old = self._git("rev-parse", "HEAD")
+        (self.root / "README.md").write_text("typo fixed\n", encoding="utf-8")
+        self.commit("docs only")
+        self.start()
+        self.run_all()
+        path = self.owner_file("older.json", commit=old)
+        release_evidence.record_manual(self.root, self.context_path, "owner", [path])
+        self.build()
+
+    def test_declared_dependencies_narrow_what_invalidates_manual_evidence(self):
+        narrowed = copy.deepcopy(self.REQUIREMENTS)
+        narrowed["manual"]["owner"]["depends_on"] = ["tools/probe.py"]
+        self._write_requirements(narrowed)
+        (self.root / "tools").mkdir()
+        (self.root / "tools/probe.py").write_text("print('probe v1')\n", encoding="utf-8")
+        measured = self.commit("probe")
+        (self.root / "app.py").write_text("print('v2')\n", encoding="utf-8")
+        self.commit("product change outside the probe")
+        self.start()
+        path = self.owner_file("narrow.json", commit=measured)
+        release_evidence.record_manual(self.root, self.context_path, "owner", [path])
+        (self.root / "tools/probe.py").write_text("print('probe v2')\n", encoding="utf-8")
+        self.commit("probe change")
+        second = self.root / "tests/evidence/release/context-2.json"
+        self.start(second)
+        with self.assertRaisesRegex(release_evidence.ReleaseEvidenceError, "tools/probe.py"):
+            release_evidence.adopt_manual(self.root, second, self.context_path)
+
+    def test_source_identity_reads_checkout_and_installed_copy(self):
+        checkout = source_identity.checkout_source(self.root)
+        self.assertEqual(checkout["commit"], self._git("rev-parse", "HEAD"))
+        self.assertFalse(checkout["uncommitted_changes"])
+        (self.root / "app.py").write_text("print('edited')\n", encoding="utf-8")
+        self.assertTrue(source_identity.checkout_source(self.root)["uncommitted_changes"])
+        self.assertIsNone(source_identity.checkout_source(self.base))
+        installed = self.base / "installed-source.json"
+        self.assertIsNone(source_identity.installed_source(installed))
+        installed.write_text('{"commit": "abc", "uncommitted_changes": false}\n', encoding="utf-8")
+        self.assertEqual(
+            source_identity.installed_source(installed),
+            {"origin": "installed", "commit": "abc", "uncommitted_changes": False},
+        )
+
     def test_repository_requirements_cover_every_product_gate(self):
         requirements = json.loads(
             (ROOT / release_evidence.REQUIREMENTS_PATH).read_text(encoding="utf-8")
@@ -304,6 +387,9 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self.assertEqual(requirements["decisions"]["sdcv_stdin"]["version"], "0.5.5")
         for decision in requirements["decisions"].values():
             self.assertTrue((ROOT / decision["record"]).is_file())
+        for group in requirements["manual"].values():
+            for pattern in group.get("depends_on", []):
+                self.assertTrue((ROOT / pattern).is_file(), pattern)
 
 
 
@@ -525,6 +611,14 @@ class PackagingMatrixTests(unittest.TestCase):
         manifest = self.install()
         self.assert_manifest_matches_regular_files(manifest)
         self.assertEqual(manifest["roots"]["dms"], [])
+        installed = json.loads(
+            (self.roots["app_lib"] / "installed-source.json").read_text(encoding="utf-8")
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True, stdout=subprocess.PIPE, text=True
+        ).stdout.strip()
+        self.assertEqual(installed["commit"], head)
+        self.assertIsInstance(installed["uncommitted_changes"], bool)
         config_path = self.config / "dank-lookup/config.json"
         config_before = config_path.read_bytes()
         dictionary = self.data / "stardict/dic/user-dictionary.sentinel"
