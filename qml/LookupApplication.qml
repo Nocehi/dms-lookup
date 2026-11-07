@@ -12,6 +12,7 @@ Item {
     // by name. The tokens themselves always come from the one LookupTheme.
     property var themeHost: null
     readonly property var activeTheme: lookupTheme
+    readonly property var lookupController: controller
     // "center" (default): a floating window that niri places, centred.
     // "pointer": a transparent overlay on the focused output; the card opens
     // just below the pointer, like the macOS Look Up popover opens under the
@@ -144,7 +145,7 @@ Item {
             LookupCard {
                 id: lookupCard
                 anchors.fill: parent
-                controller: controller
+                controller: root.lookupController
                 theme: root.activeTheme
 
                 onCloseRequested: root.setShown(false)
