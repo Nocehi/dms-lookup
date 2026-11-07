@@ -253,6 +253,72 @@ sudo rm /etc/udev/rules.d/70-dank-magic-trackpad-haptic.rules && sudo udevadm co
 
 ---
 
+## 五、Apple Silicon MacBook 內建觸控板（Asahi Linux）可行性
+
+2026-11-06 調查，未上機實測。問題：Nocehi 的 A2338 在 Asahi Linux 下，能否沿用 A3120 的深壓監聽與觸覺。資料來源是 AsahiLinux/linux `asahi` 分支原始碼（`drivers/hid/hid-magicmouse.c`、`drivers/hid/spi-hid/spi-hid-apple-core.c`、`drivers/hid/dockchannel-hid/dockchannel-hid.c`、`hid-ids.h`、`t8103-j293.dts`、`t8112-j493.dts`，當日讀取）和 [AsahiLinux/linux PR #573](https://github.com/AsahiLinux/linux/pull/573)（hex-64 的 `asahi-haptic-touchpad` 分支，讀了 `hid-apple-actuator.c` 及其對 `hid-magicmouse.c`、`dockchannel-hid.c` 的改動）。
+
+### 5.1 先要分清是哪一代：A2338 有兩款
+
+A2338 是 13 吋 MacBook Pro 的型號，M1（2020，J293）和 M2（2022，J493）共用。兩者的觸控板走不同傳輸，結論也不同。在機上執行 `cat /proc/device-tree/model` 即可分辨。（M1 MacBook Air 是 A2337，不是 A2338。）
+
+| | M1（J293） | M2（J493） |
+|---|---|---|
+| 傳輸 | SPI（`spi-hid-apple`），`BUS_SPI` = 0x1C | DockChannel MTP（`dockchannel-hid`），`BUS_HOST` = 0x19 |
+| evdev 裝置名 | `Apple SPI Trackpad` | `Apple MTP multi-touch` |
+| vendor:product | `05ac:0341` | `05ac:0354` |
+| 壓力 | 有，`ABS_MT_PRESSURE` 0–6000 | 同左 |
+| 觸覺 actuator 介面 | **未暴露**：驅動把介面數限制為 mngt、keyboard、trackpad 三個 | **已暴露**：裝置樹有 `actuator {}` 節點，註冊為 HID 裝置 `Apple MTP actuator`，有 hidraw |
+| 監聽可行 | 改裝置配對與門檻後可行 | 同左 |
+| 觸覺可行 | 需改內核 | 很可能可行，需新的報告格式並上機驗證 |
+
+### 5.2 觸控與壓力（兩代相同）
+
+兩代最終都由 `hid-magicmouse` 的 `magicmouse_raw_event_mtp()` 解析（M1 先去掉 8 字節 SPI 外殼）。每個觸點的 `struct tp_finger` 有 `pressure` 欄位，驅動直接報為 `ABS_MT_PRESSURE`；按鍵報為 `BTN_MOUSE`（與 `BTN_LEFT` 同一個鍵碼）。與 A3120 不同之處：
+
+- **壓力量程 0–6000，resolution 設為 1**。驅動註釋說單位「大約是克」（"Pressure unit seems to be ~grams"）。A3120 是 0–253，無單位。所以門檻 160 不能照搬：在這個量程上 160 大概只是輕放手指。必須先用 `pressure_probe.py`／`margin_probe.py` 在機上量普通點擊與深壓的峰值和持續時間，再定門檻。維持時間與移動距離的分辨方法（3.3 節）可以沿用。
+- **座標**：M2 用 J314 常數，解析度約 95 單位／毫米；M1 開機時向裝置查詢尺寸。監聽程式從 `absinfo` 讀解析度換算 `--max-move`，不必改。Y 軸為負值區間，不影響距離計算。
+- 點擊本身由觸控板韌體處理（「裝置控制」模式），按下時韌體自己震。這與 A3120 一致，也符合我們不接管點擊的原則。
+- evdev 節點照常屬 `input` 群組，讀取權限與現在相同。
+
+### 5.3 觸覺：兩代分別說明
+
+**`haptic_pulse.py --format mtp` 與 Apple 的 MTP 無關。** 這個名字來自外部專案 Magic-TP-extended 的報告格式（`F2 53 01 …`，藍牙 `0265`，見 2.1）。它不是根據 Asahi 或 MacBook 內建觸控板定的，對 MacBook 不適用。之後應改名（例如 `tpx`），以免混淆。
+
+**M2（DockChannel）**：PR #573 加了 `hid-apple-actuator` 驅動。從中可知 actuator 用的報告是：
+
+- 輸出報告 `0x53` 播放波形，格式為 `53 01 <強度 u8> <柔和度 u8> <波形…>`。深壓波形是 `53 01 <s> <soft> 01 07 18 18 4F 02 02 60 0C 25`（14 字節）。普通點擊是 `… 03 02 22 48 49 01 04 60 17 2D 03 02 18 32 1E`（19 字節）。放開只送前 4 字節。柔和度預設 `0x90`，強度是 0–100 映射到 0–255。
+- 特徵報告 `0x21 <0|1>` 切換「裝置控制」與「主機控制」兩種模式。主機控制模式下觸控板不再自己點擊，要等主機發信號。
+
+這與 A3120 的 `53 01 <u32 強度> 21 2B 06 01 00 16 41 13` **不同構**：強度只佔一字節，後面接柔和度和不同的波形。現行監聽程式在 `BUS_HOST` 上會走 USB 分支。如果 actuator 的描述宣告了 `0x53`，它會把 A3120 的報告寫過去，效果無法預料。
+
+寫入路徑：`dockchannel-hid` 沒有 `output_report`，所以 hidraw 的 `write()` 會走 `raw_request(SET_REPORT, OUTPUT)`。現行 Asahi 的 `dchid_set_report()` 一律以輸出報告送出，所以用 hidraw 寫 `0x53` 在原理上可行（推論，未實測）。PR 的 `c9ff8ad` 修的是特徵報告被錯當輸出報告送出的問題，只影響 `0x21`，我們不需要 `0x21`。
+
+**未知、須實測的一點**：PR 的驅動先切到主機控制模式才播放。在裝置控制模式下直接送 `0x53` 會不會震，原始碼看不出來。A3120 在預設模式下直接送 `0x53` 就會震，所以這一點有希望，但不能假定。若只有主機控制模式才能播放，代價是韌體不再自己點擊，點擊要由用戶態代勞。那正是 2.2.1 節否決的接管點擊路線，不應為了深壓觸覺而接受。
+
+**M1（SPI）**：`spi-hid-apple` 的 `SPIHID_MAX_DEVICES` = 3。裝置回報超過三個介面時，驅動會記 `limiting the number of devices to mngt, kbd and mouse` 並丟棄其餘。M1 若有 actuator 介面，也不會出現在 Linux 上。在機上執行 `journalctl -k | grep -i 'limiting the number'` 可以知道是否有被丟棄的介面。觸控板介面本身有 hidraw，但 actuator 很可能是另一個介面，往觸控板 hidraw 寫 `0x53` 不能指望會震（未測，不建議亂寫）。要讓 M1 有觸覺，須改 `spi-hid-apple` 註冊更多介面，屬內核工作。
+
+### 5.4 udev 權限（M2）
+
+actuator、觸控板、鍵盤三個 HID 裝置的 `vendor:product`（`05ac:0354`）和 bus 都相同。若照 A3120 的寫法按 `KERNELS=="0019:05AC:0354.*"` 配對，會連鍵盤的 hidraw 也一併開給用戶，等同讓任何本機程式讀取按鍵，**不可接受**。規則必須按 HID 名稱收窄，例如：
+
+```
+SUBSYSTEM=="hidraw", IMPORT{parent}="HID_NAME", ENV{HID_NAME}=="Apple MTP actuator", TAG+="uaccess"
+```
+
+`IMPORT{parent}` 能否取到父 HID 裝置的 `HID_NAME` 未經驗證。安裝前須用 `udevadm info -a`／`udevadm test` 確認：只有 actuator 那個節點變為可寫。
+
+### 5.5 結論
+
+- **現行 `dank-force-press-watch` 不改不能用。** `find_device()` 只認產品 ID `0265`／`0324`，會找不到內建觸控板；門檻 160 也不適用於 0–6000 的量程。
+- **監聽（兩代）**：需要一個小改動，不是新架構：裝置配對加上 `0341`／`0354`（或按 `Apple SPI Trackpad`／`Apple MTP multi-touch` 名稱配對），門檻改為按裝置設定，數值先量測再定。量測工具也要同樣加入這些 ID。
+- **觸覺（M2）**：需要像藍牙那樣加一個傳輸分支（`BUS_HOST`）：按 HID 名稱找 `Apple MTP actuator`，送 `53 01 <s> <soft> …` 的深壓波形，再配一條收窄的 udev 規則。成敗取決於 5.3 節那個未知點，即裝置控制模式下 `0x53` 能否播放。
+- **觸覺（M1）**：受阻，需先改內核（`spi-hid-apple`）。在此之前，深壓查詢可以照常觸發，只是沒有震動；或者只靠韌體本身的點擊震動。
+- **長遠路線**：若 PR #573 合併，正規做法是對觸控板 evdev 上傳 `FF_HAPTIC` 效果（即 4.3 節的 FF_HAPTIC 路線），不再直寫 hidraw。但它一上傳效果就切到主機控制模式，與我們不接管點擊的原則衝突。PR #573 截至讀取時仍未合併，審查意見在 Kconfig 依賴與提交拆分。用戶態示例見 [libinput MR 1508](https://gitlab.freedesktop.org/libinput/libinput/-/merge_requests/1508)（未細讀）。
+
+上機時建議依序做：(1) 確認機型與 `journalctl -k`；(2) `evtest` 看裝置名、ID、壓力量程；(3) 改 ID 後跑 `margin_probe.py` 量普通點擊與深壓；(4) 僅限 M2：`--dump` 看 actuator 的報告描述有無 `0x53`，再以 root 手動寫一次深壓波形，確認裝置控制模式下會震，且點擊照常。
+
+其他前例：[mactic](https://github.com/MatMercer/mactic) 在 macOS 上經私有 `MultitouchSupport.framework` 驅動 actuator，提供 6 種波形，可作手感參考，與 Linux 無關。除 PR #573 外，沒有找到 Asahi 上做深壓或觸覺的其他公開專案。
+
 ## 附錄：repo 內相關檔案
 
 | 檔案 | 用途 |
