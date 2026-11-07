@@ -34,6 +34,32 @@ popouts do. A compositor without that protocol ignores the request and the
 window behind shows through faintly. The 0.35 outline border matches the
 border DMS draws on blurred surfaces (`blurBorderEnabled`, default opacity 0.35).
 
+## Corners and padding
+
+Corners are circular arcs (`Rectangle.radius`), like niri window corners, the
+DMS shaders (`sdRoundBox`), the blur region and `RectangularShadow`. Keep them
+circular: a squircle on the card alone would not line up with its own border,
+shadow and blur region. Radii follow DMS: Material 3 corner tokens scaled by
+`radiusStrength / 50`, chosen by the control's height, not by its content.
+
+Two rules keep text clear of the corner arc:
+
+1. A control's horizontal padding is at least its corner radius. The text box
+   then ends at or past the point where the arc meets the straight edge, so it
+   cannot enter the arc. Current values: chips 28 px high, radius 12, padding
+   12; buttons 32 px high, radius 12 or pill (16), padding 16; card radius 24,
+   padding 16. Horizontal padding is about twice the vertical padding, because
+   the rounded ends of a pill leave less room than a rectangle.
+2. A filled control that sits in a card corner has a radius of at least
+   `windowRadius - popoutPadding` (24 - 16 = 8). At exactly that value the two
+   arcs share a centre (concentric); a larger radius leaves a little more room
+   on the diagonal, which is fine; a smaller one looks pinched.
+
+Labels use the default `lineHeight` (1.0) and `AlignVCenter`, which centres the
+font's ascent + descent box, not the ink. Misans TC VF centres CJK labels within
+1 px, so no optical offset is applied. `bodyLineHeight` (1.45) applies only to
+the result body and does not change control heights.
+
 ## Palette
 
 Colours are matugen role names: `primary`, `on_primary`, `surface`,
