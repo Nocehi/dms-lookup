@@ -51,6 +51,7 @@ INCOMPLETE_SOURCE_WARNINGS = frozenset({"lookup_budget_exhausted", "sdcv_source_
 # Four UTF-8 bytes per Unicode scalar keeps every inline body within the CLI's
 # 8 MiB open-text stdin limit. Larger complete bodies must use open-ref.
 MAX_INLINE_FULL_CHARS = 2 * 1024 * 1024
+_MIN_SHARED_PREVIEW_CHARS = 600
 TRUNCATION_MARKER = "[… preview truncated; Open full for complete entry …]"
 CANTONESE_MARKERS = frozenset("嘅喺唔冇咗啲嗰佢哋噉咁乜嘢嚟喎囉㗎")
 CANTONESE_PHRASES = (
@@ -405,7 +406,12 @@ _LINE_RULES: list[tuple[re.Pattern[str], str]] = [
     # Part-of-speech tags in brackets with Han text: [形], [動詞].
     (re.compile(r"^\s*(\[[㐀-鿿]{1,6}\])"), "d"),
     # Latin part-of-speech abbreviations at line start or after a sense marker.
-    (re.compile(r"^(?:\s*\d{1,3}\s*▶\s*|\s*)((?:vt|vi|v|n|adj|adv|int|prep|conj|pron|abbr|aux|num|art|pref|prefix|suffix)\.(?:\s*[a-z]+\.)*)(?=\s|$)"), "id"),
+    (re.compile(r"^(?:\s*\d{1,3}\s*▶\s*|\s*)((?:vt|vi|vb|v|n|a|adj|adv|int|interj|prep|conj|pron|abbr|abbrev|aux|num|art|det|phr|pref|prefix|suffix|anagr|alt)\.(?:\s*[a-z]+\.)*)(?=\s|$)"), "id"),
+    # WordNet senses: "adj 1:", "n 2:", "v :" and continued "3:".
+    (re.compile(r"^\s*(n|v|adj|adv)(?=\s+(?:\d{1,3})?\s*:)"), "id"),
+    (re.compile(r"^\s*(?:(?:n|v|adj|adv)\s+)?(\d{1,3}):"), "bd"),
+    # words.hk readings with Han variant prefixes: [hang4,衡:hang4].
+    (re.compile(r"^\s*(\[[a-z]+[1-6](?:(?:[ ,:]|[㐀-鿿]{1,6}:)+[a-z]+[1-6])*\])"), "d"),
     # Example / quotation / note lines (Chinese dictionaries).
     (re.compile(r"^\s*((?:例|引|如|英|註|注|參見|見)：.*)$"), "d"),
     (re.compile(r"^\s*((?:部首|總筆畫|筆畫|部外筆畫)：.*)$"), "d"),
@@ -423,12 +429,30 @@ _INLINE_RULES: list[tuple[re.Pattern[str], str]] = [
     # GCIDE etymology/inflection brackets.
     (re.compile(r"(\[(?:Etym|imp\.|p\. p\.|pl\.|R\.)[^\]\n]{0,200}\])"), "d"),
     # Sense separators in CC-CEDICT and JMdict, JMdict arrows and markers.
-    (re.compile(r"(\s[|¦]\s)"), "d"),
+    (re.compile(r"(\s[|¦](?:\s|$))"), "d"),
+    # JMdict sense numbers after a "‖" separator.
+    (re.compile(r"‖\s*(\d{1,3})(?=\s*▶)"), "bd"),
     (re.compile(r"(→|█|▊|▶)"), "d"),
 ]
 
 
+# Rules that may span hard-wrapped lines. Brackets allow one nested level
+# because GCIDE writes accents as [e^] inside [imp. ...].
+_SPAN_RULES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(\[(?:Etym|imp\.|p\. p\.|pl\.|R\.)(?:[^\[\]]|\[[^\[\]\n]{0,8}\]){0,400}\])"), "d"),
+    # WordNet synonym/antonym/also lists.
+    (re.compile(r"(\[(?:syn|ant|also):(?:[^\[\]]|\[[^\[\]\n]{0,8}\]){0,800}\])"), "d"),
+    # WordNet quoted examples.
+    (re.compile(r'((?<=[;:] )"[^"]{1,400}"|(?<=[;:])"[^"]{1,400}")'), "d"),
+]
+
+
 def _rule_flags(plain: str, flags: list[set[str]]) -> None:
+    for pattern, styles in _SPAN_RULES:
+        for match in pattern.finditer(plain):
+            for index in range(match.start(1), match.end(1)):
+                if plain[index] != "\n":
+                    flags[index].update(styles)
     start = 0
     for line in plain.split("\n"):
         for pattern, styles in _LINE_RULES:
@@ -444,6 +468,71 @@ def _rule_flags(plain: str, flags: list[set[str]]) -> None:
         start += len(line) + 1
 
 
+# ---- Display layout -----------------------------------------------------------
+# Plain sources often arrive hard-wrapped (GCIDE and WordNet at 72 columns with
+# hanging indents, JMdict with "‖"-joined senses). Layout flags let the card
+# reflow them without touching the text that Copy and Open use:
+#   "w" a line break (plus the next line's indentation) shown as one space,
+#   "j" the same shown as nothing (CJK or a word broken after a hyphen),
+#   "l" a space shown as a line break,
+#   "e" an HTML entity left in plain text, shown decoded.
+_LAYOUT_FLAGS = frozenset("wjl")
+# Lines that start structure and never continue the line above.
+_BLOCK_START = re.compile(
+    r"(?:\(?\d{1,3}[.):]?(?=\s)|\d{1,3}:|\([a-z]\)\s|[①-⑳❶-❿•‖]|--|Syn\.|Note:"
+    r"|(?:n|v|adj|adv)\s+(?:\d{1,3})?\s*:)"
+)
+_ENTITY = re.compile(r"&(?:amp|lt|gt|quot|apos|nbsp|#\d{1,7}|#x[0-9a-fA-F]{1,6});")
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _layout_flags(plain: str, flags: list[set[str]]) -> None:
+    lines = plain.split("\n")
+    starts = []
+    position = 0
+    for line in lines:
+        starts.append(position)
+        position += len(line) + 1
+    paragraph_indent = _indent(lines[0]) if lines else 0
+    sense_paragraph = "▶" in lines[0] if lines else False
+    for number in range(1, len(lines)):
+        above, line = lines[number - 1], lines[number]
+        body = line.lstrip(" ")
+        joined = False
+        if above.rstrip().endswith("‖") and body[:1].isdigit():
+            # The break already goes before the "‖" (see "l" below).
+            joined = True
+        elif above.strip() and body and not _BLOCK_START.match(body):
+            # A hanging indent continues the paragraph; JMdict senses wrap
+            # without one.
+            joined = _indent(line) > paragraph_indent or (
+                sense_paragraph and _indent(line) == paragraph_indent
+            )
+        if joined:
+            tail, head = above.rstrip()[-1:], body[:1]
+            glue = "j" if (
+                _HAN.match(tail) or _HAN.match(head) or re.match(r"[぀-ヿ]", tail + head)
+                or re.search(r"[A-Za-z]-$", above.rstrip())
+            ) else "w"
+            newline = starts[number] - 1
+            for index in range(newline, starts[number] + _indent(line)):
+                flags[index].clear()
+                flags[index].add(glue)
+        else:
+            paragraph_indent = _indent(line)
+            sense_paragraph = "▶" in line
+    for match in re.finditer(r" (?=‖)", plain):
+        if match.start() > 0 and plain[match.start() - 1] != "\n":
+            flags[match.start()].clear()
+            flags[match.start()].add("l")
+    for match in _ENTITY.finditer(plain):
+        for index in range(match.start(), match.end()):
+            flags[index].add("e")
+
+
 def style_flags(raw: str, plain: str, *, definition_format: str = "plain") -> list[set[str]]:
     flags: list[set[str]] | None = None
     if definition_format == "html":
@@ -451,6 +540,8 @@ def style_flags(raw: str, plain: str, *, definition_format: str = "plain") -> li
     if flags is None:
         flags = [set() for _ in plain]
     _rule_flags(plain, flags)
+    if definition_format != "html":
+        _layout_flags(plain, flags)
     # Italic CJK reads badly; show it dimmed instead.
     for index, char in enumerate(plain):
         if "i" in flags[index] and _HAN.match(char):
@@ -467,7 +558,7 @@ def runs_from_flags(text: str, flags: list[set[str]]) -> list[list[str]] | None:
     for index, char in enumerate(text):
         key = "".join(sorted(flags[index])) if index < len(flags) else ""
         if char == "\n":
-            key = ""
+            key = "".join(sorted(flags[index] & _LAYOUT_FLAGS)) if index < len(flags) else ""
         styled = styled or key != ""
         if runs and runs[-1][1] == key:
             runs[-1][0] += char
@@ -1278,10 +1369,18 @@ def render_entries(
         full = entry["full_body"]
         full_section = _section(entry, full)
         full_parts.append(full_section)
-        entry_truncated = len(full) > max_entry_chars
+        entry_limit = max_entry_chars
+        if preview_parts:
+            # A later source gets a shorter preview instead of none when the
+            # sources before it used most of the body budget.
+            room = (max_body_chars - preview_total - 2 - len(_section(entry, ""))
+                    - len(TRUNCATION_MARKER) - 2)
+            if len(full) > room >= _MIN_SHARED_PREVIEW_CHARS:
+                entry_limit = min(entry_limit, room)
+        entry_truncated = len(full) > entry_limit
         preview = full
         if entry_truncated:
-            preview = full[:max_entry_chars].rstrip() + "\n" + TRUNCATION_MARKER
+            preview = full[:entry_limit].rstrip() + "\n" + TRUNCATION_MARKER
         section = _section(entry, preview)
         flags = style_flags(
             entry["_raw"], full, definition_format=entry["_definition_format"]

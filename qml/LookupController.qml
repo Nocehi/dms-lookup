@@ -657,13 +657,37 @@ Item {
 
     // Lines are {text, runs}; runs are the backend's [text, flags] style runs
     // ("b" bold, "i" italic, "d" dimmed). A body without runs is one plain run
-    // per line.
+    // per line. Layout flags change only what is shown, never the body: "w"
+    // shows a hard line break as a space, "j" as nothing, "l" shows a space as
+    // a line break, and "e" decodes an HTML entity left in plain text.
+    function decodeEntities(text) {
+        return text.replace(/&(amp|lt|gt|quot|apos|nbsp|#\d{1,7}|#x[0-9a-fA-F]{1,6});/g,
+                            function(all, name) {
+            var named = {amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0"}
+            if (named[name] !== undefined)
+                return named[name]
+            var code = name.charAt(1) === "x" ? parseInt(name.slice(2), 16)
+                                              : parseInt(name.slice(1), 10)
+            return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : all
+        })
+    }
+
+    function shownText(text, flags) {
+        if (flags.indexOf("w") >= 0)
+            return " "
+        if (flags.indexOf("j") >= 0)
+            return ""
+        if (flags.indexOf("l") >= 0)
+            return "\n"
+        return flags.indexOf("e") >= 0 ? decodeEntities(text) : text
+    }
+
     function entryLines(entry) {
         var runs = Array.isArray(entry.runs) && entry.runs.length > 0
                    ? entry.runs : [[String(entry.body), ""]]
         var lines = [{text: "", runs: []}]
         for (var i = 0; i < runs.length; ++i) {
-            var pieces = String(runs[i][0]).split("\n")
+            var pieces = shownText(String(runs[i][0]), String(runs[i][1] || "")).split("\n")
             for (var j = 0; j < pieces.length; ++j) {
                 if (j > 0)
                     lines.push({text: "", runs: []})
@@ -730,6 +754,9 @@ Item {
                 continue
             var words = [queryWord, String(entry.word || "").trim()]
             var lines = stripEcho(entryLines(entry), words)
+            if (shaped.pronunciation !== "")
+                lines = stripEcho(lines, ["[" + shaped.pronunciation + "]",
+                                          shaped.pronunciation].concat(words))
             if (shaped.sections.length === 0 && shaped.pronunciation === "") {
                 // Character entries put radical and stroke lines first.
                 for (var k = 0; k < Math.min(4, lines.length); ++k) {
