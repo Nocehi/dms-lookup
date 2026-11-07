@@ -54,6 +54,10 @@ Item {
     property var resultsByToken: ({})
     property string activeToken: ""
     property string activeTokenKey: ""
+    // Local data detectors (date, URL, unit…) appear as one synthetic mode
+    // chip. It is switched locally and never sent back to the backend.
+    readonly property string detectMode: "detect"
+    property var detections: []
 
     // Opt-in, in-memory-only benchmark seam. Durations are monotonic nanoseconds
     // from request acceptance; neither query text nor result content is exposed.
@@ -115,6 +119,7 @@ Item {
         resultsByToken = ({})
         activeToken = ""
         activeTokenKey = ""
+        detections = []
         backendTiming = ({})
     }
 
@@ -341,13 +346,87 @@ Item {
         return ""
     }
 
+    function detectionResult(items) {
+        var sections = []
+        var copies = []
+        for (var i = 0; i < items.length; ++i) {
+            var item = items[i] || ({})
+            var lines = Array.isArray(item.lines) ? item.lines : []
+            var heading = items.length > 1 && item.label ? "[" + item.label + "]\n" : ""
+            sections.push(heading + lines.join("\n"))
+            var itemCopies = Array.isArray(item.copy) ? item.copy : []
+            for (var j = 0; j < itemCopies.length; ++j) {
+                if (itemCopies[j] && itemCopies[j].value !== undefined
+                        && String(itemCopies[j].value) !== "")
+                    copies.push({label: String(itemCopies[j].label || "Copy"),
+                                 value: String(itemCopies[j].value)})
+            }
+        }
+        var first = items[0] || ({})
+        return {
+            label: String(first.label || "Detected"),
+            subtitle: "",
+            body: sections.join("\n\n"),
+            full_body: null,
+            full_ref: null,
+            truncated: false,
+            detection: true,
+            copy: copies,
+            swatch: first.swatch ? String(first.swatch) : ""
+        }
+    }
+
+    function mapWithDetections(map) {
+        if (detections.length === 0)
+            return map
+        var merged = ({})
+        var keys = modeKeys(map)
+        for (var i = 0; i < keys.length; ++i)
+            merged[keys[i]] = map[keys[i]]
+        merged[detectMode] = detectionResult(detections)
+        return merged
+    }
+
+    function modesWithDetections(modes) {
+        var list = Array.isArray(modes) ? modes.slice() : []
+        if (detections.length > 0 && list.indexOf(detectMode) < 0)
+            list.push(detectMode)
+        return list
+    }
+
+    function activeIsDetection() {
+        return activeMode === detectMode && !activeTokenKey
+                && !!(resultsByMode[detectMode] && resultsByMode[detectMode].detection)
+    }
+
+    function activeCopyChoices() {
+        var result = activeResult()
+        return result && result.detection && Array.isArray(result.copy) ? result.copy : []
+    }
+
+    function activeSwatch() {
+        var result = activeResult()
+        return result && result.detection && result.swatch ? String(result.swatch) : ""
+    }
+
+    // Copy sends the detected value (e.g. ISO date), not the preview text.
+    function activeCopyText(index) {
+        var choices = activeCopyChoices()
+        var position = Number(index || 0)
+        if (choices.length > 0)
+            return String((choices[position] || choices[0]).value)
+        return activeBody()
+    }
+
     function applyResponse(data) {
         response = data || ({})
-        topResultsByMode = data.results_by_mode || ({})
+        detections = Array.isArray(data.detections) ? data.detections : []
+        topResultsByMode = mapWithDetections(data.results_by_mode || ({}))
         topRelatedByMode = data.related_by_mode || ({})
         resultsByMode = topResultsByMode
         relatedByMode = topRelatedByMode
-        availableModes = data.available_modes || modeKeys(resultsByMode)
+        availableModes = modesWithDetections(data.available_modes
+                                             || modeKeys(data.results_by_mode || ({})))
         unavailableModes = data.unavailable_modes || []
         incompleteModes = data.incomplete_modes || []
         incompleteTokens = data.incomplete_tokens || []
@@ -380,7 +459,8 @@ Item {
         }
         backendTiming = data.timing || ({})
         errorText = responseErrorMessage(data.error)
-        phase = errorText !== "" ? "error" : "ready"
+        // A detected value is still useful when no dictionary could run.
+        phase = errorText !== "" && detections.length === 0 ? "error" : "ready"
         scrollResetRequested()
         if (benchmarkEnabled)
             pendingResultQmlFrameTick = true
@@ -457,6 +537,8 @@ Item {
     function applyMode(mode) {
         if (availableModes.indexOf(mode) < 0 || !resultsByMode[mode])
             return false
+        if (mode === detectMode)
+            return applyLocalMode(mode)
         return startFollowupLookup("mode_change", selectionSource, mode) !== ""
     }
 
@@ -541,7 +623,8 @@ Item {
             activeTokenKey = ""
             resultsByMode = topResultsByMode
             relatedByMode = topRelatedByMode
-            availableModes = response.available_modes || modeKeys(resultsByMode)
+            availableModes = modesWithDetections(response.available_modes
+                                                 || modeKeys(response.results_by_mode || ({})))
             activeMode = chooseMode(response.default_mode, availableModes,
                                     resultsByMode)
             showRelated = false
@@ -995,7 +1078,15 @@ Item {
             })
         }
         if (action === "copy-payload")
-            return activeBody()
+            return activeCopyText(Number(argument || 0))
+        if (action === "detections")
+            return JSON.stringify({
+                count: detections.length,
+                active: activeIsDetection(),
+                modes: availableModes,
+                copy_labels: activeCopyChoices().map(function(choice) { return choice.label }),
+                swatch: activeSwatch()
+            })
         if (action === "copy") {
             testCopyRequested()
             return "started"

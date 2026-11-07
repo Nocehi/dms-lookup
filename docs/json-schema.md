@@ -96,10 +96,43 @@ fallback; fresh configs explicitly set `exact_only`.
 | `results_by_token` | object | Token result objects keyed by `token_items[].key` (currently `index:token`); readers may accept legacy raw-token keys. |
 | `subtitle`, `body`, `truncated` | mixed | Compatibility projection of the default exact mode's preview. |
 | `config` | object | Attempted path, loaded flag, and non-sensitive warning code. |
+| `detections` | object[] | Local data detections for the whole query (may be empty); see below. A detector failure adds warning `detector_error` and never fails the lookup. |
 | `warnings` | string[] | Backend warning codes; partial success may retain warnings with `error: null`. No query content. |
 | `error` | object or null | Structured `{code,message}` failure. Codes include `query_too_long`, `empty_query`, `sdcv_missing`, `lookup_timeout`, and `backend_error`. Structured lookup failures are JSON results and may use process exit 0. |
 | `timing` | object | Monotonic backend start plus measured backend/total milliseconds. |
 | `runtime` | object | CLI-added retention state; `retained` is false by default. |
+
+## Detection
+
+Present on every lookup result (empty when nothing matches or detectors are
+disabled). Detection runs only when the whole trimmed, NFKC-normalised query
+(single line, at most `detectors.max_query_chars`, default 200) is one value;
+text inside a sentence is never scanned. It runs even when `sdcv` is missing.
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | string | `url`, `email`, `color`, `number_base`, `timestamp`, `date`, or `unit`. |
+| `label` | string | Short user-facing chip label, e.g. `日期`, `網址`, `長度`. |
+| `lines` | string[] | Plain-text preview lines. |
+| `copy` | object[] | `{label,value}` choices; the card offers one Copy per choice. |
+| `swatch` | string | `color` only: `#rrggbb`. |
+
+The frontend shows detections as a synthetic mode `detect` that is switched
+locally and never sent to the backend. Configuration:
+
+```json
+"detectors": {
+  "enabled": true,
+  "kinds": {"url": true, "email": true, "color": true, "number_base": true,
+            "timestamp": true, "date": true, "unit": true},
+  "calendars": ["roc", "japanese", "ganzhi", "iso_week"],
+  "date_order": "auto",
+  "max_query_chars": 200
+}
+```
+
+`date_order` (`auto`, `dmy`, `mdy`) orders the two readings of an ambiguous
+numeric date; `auto` puts month first only for `en_US`/`en_PH` locales.
 
 ## Mode result
 

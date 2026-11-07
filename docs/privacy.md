@@ -39,6 +39,15 @@ failed capture becomes a metadata-only UI state and never sends an empty query.
 integers from 1 to 5000. Their production defaults remain 250 ms until the
 required multi-owner raw dataset, trade-off report, and owner approval exist.
 
+## Local data detectors
+
+`lib/dank_lookup_detectors.py` inspects the query already in the backend
+process and returns preview lines. It imports no network, process or file API
+(`tests/test_detectors.py` enforces this by AST), fetches no page, title,
+favicon, parcel status or exchange rate, and keeps no state. URL previews only
+parse the string; the card offers Copy but no Open action. Local time uses the
+system time zone through the standard library.
+
 ## Runtime data
 
 Runtime helpers use:
