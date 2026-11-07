@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Simplify release evidence: bind it to a Git commit and tree hash, build the
+  bundle source with `git archive` (untracked files can no longer enter it),
+  run automated evidence in a temporary worktree with the commands fixed in
+  the commit's `review-evidence-requirements.json`, and let owner-run evidence
+  carry over only across documentation-only commits. Remove the custom source
+  manifest, the anonymous-fd sentinel handoff, archive rescans and the
+  per-release sdcv stdin and socket gates; those two are now decision records
+  in `docs/decisions/`, and the bundle refuses a different sdcv version.
+
 ## Unreleased — standalone-first 0.8.0
 
 - Drop the Copy button from dictionary results: copy from the right-click

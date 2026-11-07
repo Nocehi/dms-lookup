@@ -1,25 +1,74 @@
 {
-  "schema_version": 1,
-  "required_groups": {
-    "unit_logs": ["tests/evidence/release/unit/*.log"],
-    "integration_logs": ["tests/evidence/release/integration/*.log"],
-    "pre_release_logs": ["tests/evidence/release/pre-release/*.log"],
-    "qml_logs": ["tests/evidence/release/qml/*.log"],
-    "sdcv_gate_report": ["tests/evidence/sdcv-stdin/gate-*/report.json"],
-    "sdcv_gate_raw": ["tests/evidence/sdcv-stdin/gate-*/*.stdout.bin"],
-    "socket_decision": ["tests/evidence/socket-architecture/gate-*/decision.md"],
-    "socket_gate_report": ["tests/evidence/socket-architecture/gate-*/report.json"],
-    "selection_raw_latency": ["tests/evidence/release/selection/*raw*.json"],
-    "selection_tradeoff_report": ["tests/evidence/release/selection/*report*.json"],
-    "backend_raw_benchmark": ["tests/evidence/release/benchmarks/backend*.json"],
-    "qml_raw_benchmark": ["tests/evidence/release/benchmarks/qml*.json"],
-    "giant_rss": ["tests/evidence/giant-entry-memory/*/report.json"],
-    "wayland_owner": ["tests/evidence/release/wayland/*.json"],
-    "dms_session_owner": ["tests/evidence/release/wayland/*dms*.json"],
-    "percentile_recalculation": ["tests/evidence/release/recalculated/*.json"],
-    "privacy_logs": ["tests/evidence/release/privacy/*.log"],
-    "commands": ["tests/evidence/release/commands/*.txt"],
-    "environment": ["tests/evidence/release/environment/*.json"],
-    "release_binding": ["tests/evidence/release/binding/*.json"]
+  "schema_version": 2,
+  "automated": {
+    "unit": {
+      "commands": [
+        ["python3", "-m", "unittest", "-v",
+         "tests.test_benchmarks", "tests.test_cancellation_full_stack", "tests.test_cli",
+         "tests.test_core", "tests.test_dependency_preflight", "tests.test_design_tokens",
+         "tests.test_fixture_runner", "tests.test_packaging", "tests.test_runtime",
+         "tests.test_selection_latency", "tests.test_transport"],
+        ["python3", "-m", "unittest", "-v", "tests.test_detectors", "tests.test_force_touch"]
+      ]
+    },
+    "integration": {
+      "commands": [
+        ["cargo", "test", "--manifest-path", "tokenizer/Cargo.toml", "--locked"],
+        ["python3", "tests/run_backend_fixtures.py", "tests/fixtures"],
+        ["python3", "tests/run_backend_fixtures.py", "tests/fixtures-ci-minimal"],
+        ["python3", "tests/run_backend_fixtures.py", "tests/fixtures-reading-routing"],
+        ["python3", "tests/run_backend_fixtures.py", "tests/fixtures-ja-yue"],
+        ["python3", "tests/run_backend_fixtures.py", "tests/fixtures-risk-hardening"],
+        ["python3", "tests/run_backend_fixtures.py", "tests/fixtures-segmentation"],
+        ["python3", "tests/run_backend_fixtures.py", "tests/fixtures-v2-related"]
+      ]
+    },
+    "pre_release": {
+      "commands": [["bash", "packaging/pre-release-check.sh"]]
+    },
+    "qml": {
+      "commands": [["python3", "tests/run_qml_smoke.py"]]
+    },
+    "privacy": {
+      "commands": [["python3", "tests/verify_privacy_transport.py", "--scan-path", "."]]
+    },
+    "backend_benchmark": {
+      "commands": [["python3", "tests/benchmark_lookup.py", "--config", "{config}",
+                    "--cold-samples", "5", "--warm-samples", "30",
+                    "--output", "{out}/backend-benchmark.json"]],
+      "outputs": ["backend-benchmark.json"]
+    },
+    "qml_benchmark": {
+      "commands": [["python3", "tests/benchmark_ui.py", "--config", "{config}",
+                    "--cold-samples", "3", "--warm-samples", "10",
+                    "--output", "{out}/qml-benchmark.json"]],
+      "outputs": ["qml-benchmark.json"]
+    },
+    "percentiles": {
+      "commands": [["python3", "tests/recalculate_benchmark_percentiles.py",
+                    "{out}/backend-benchmark.json", "{out}/qml-benchmark.json",
+                    "--output", "{out}/percentiles.json"]],
+      "outputs": ["percentiles.json"]
+    },
+    "giant_rss": {
+      "commands": [["python3", "tests/benchmark_giant_entry_memory.py",
+                    "--approved-rss-multiplier", "4",
+                    "--output", "{out}/giant-rss.json"]],
+      "outputs": ["giant-rss.json"]
+    }
+  },
+  "manual": {
+    "selection_raw_latency": ["tests/evidence/release/selection/raw-*.json"],
+    "selection_tradeoff_report": ["tests/evidence/release/selection/report-*.json"],
+    "wayland_owner": ["tests/evidence/release/wayland/niri-*.json"],
+    "dms_session_owner": ["tests/evidence/release/wayland/*dms*.json"]
+  },
+  "decisions": {
+    "sdcv_stdin": {
+      "tool": "sdcv",
+      "version": "0.5.5",
+      "record": "docs/decisions/sdcv-stdin.md",
+      "probe": "python3 tests/probe_sdcv_stdin.py"
+    }
   }
 }
