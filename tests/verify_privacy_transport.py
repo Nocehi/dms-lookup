@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import pathlib
+import secrets
 import socket
 import subprocess
 import sys
@@ -19,10 +20,6 @@ from typing import Iterable
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CLI = ROOT / "bin/dank-lookup"
 SELECTION = ROOT / "bin/dank-lookup-selection"
-sys.path.insert(0, str(ROOT / "packaging"))
-
-from release_evidence import read_secret_fd  # noqa: E402
-
 
 class PrivacyFailure(RuntimeError):
     pass
@@ -363,13 +360,15 @@ printf '%s\\n' '{"tokens":[]}'
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scan-path", action="append", type=pathlib.Path, default=[])
-    parser.add_argument("--sentinel-fd", required=True, type=int)
     args = parser.parse_args(argv)
+    # The sentinel exists only in this process and the children it starts;
+    # failure messages name stages and locations, never the value.
+    sentinel = b"dank-lookup-privacy-" + secrets.token_hex(32).encode("ascii")
     try:
-        sentinel = read_secret_fd(args.sentinel_fd)
         run_verifier(args.scan_path, sentinel)
     except Exception as exc:
-        print(f"PRIVACY_TRANSPORT: FAIL: {exc}", file=sys.stderr)
+        message = str(exc).replace(sentinel.decode("ascii"), "<sentinel>")
+        print(f"PRIVACY_TRANSPORT: FAIL: {message}", file=sys.stderr)
         return 1
     print("PRIVACY_TRANSPORT: PASS")
     return 0

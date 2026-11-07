@@ -20,13 +20,12 @@ directories, preserving dictionaries, config, and unlisted files.
 
 Dank Lookup supports Python 3.11 and newer. On a fresh checkout, create an
 isolated Python environment and install the exact release/test dependency set
-before running the minimum suite. The same `jsonschema` installation is used
-by the production review-bundle consumer; missing, version-skewed, or active
+before running the minimum suite; missing, version-skewed, or active
 marker-selected dependencies are rejected by the pre-release preflight.
 
 ```bash
 python3 -m venv /tmp/dank-lookup-venv
-. /tmp/dank-lookup-venv/bin/activate
+. /tmp/dank-lookup-venv/bin/activate   # fish: source /tmp/dank-lookup-venv/bin/activate.fish
 python3 -m pip install --requirement requirements-dev.txt
 ```
 
@@ -88,30 +87,61 @@ records real-Wayland owner pass/fail; without compositor timestamp evidence it
 emits no presentation latency. Default runtime writes no telemetry. Offscreen
 Quickshell IPC may need to run outside a filesystem/socket sandbox.
 
-Start a release context before collecting evidence, then record each generated
-evidence file with `packaging/release_evidence.py`. Finally run
-`packaging/build-review-bundle.sh --release-context CONTEXT --output PATH`.
-`PATH` must resolve outside the repository and must not overlap the release
-context, requirements, binding, recorded evidence, or any source input; this
-collision check runs before the builder creates temporary or durable output.
-The context binds one release session and every selected evidence checksum to
-source-manifest schema 2, algorithm
-`sha256-regular-path-mode-size-and-bytes-v2`. Each entry and the overall digest
-bind regular-file type, path, `stat.S_IMODE` permission bits, size, and bytes;
-setuid/setgid or non-regular source candidates are rejected. Generated
-evidence, caches, archives, and the external audit handoff are excluded from
-that source digest and from source staging.
+## Release evidence
 
-The bundle command generates one privacy sentinel in orchestration-process
-memory, passes that same value to the privacy verifier and internal bundle
-builder through separate protected anonymous file descriptors, and never puts
-it in arguments, environment variables, logs, or release metadata. It refuses
-incomplete unit/integration/pre-release/QML, selection, backend/QML benchmark,
-giant-RSS, real-Wayland/DMS, privacy, command, environment, or percentile
-evidence. The final check reopens both tar and compressed archives and scans
-member names, metadata, and uncompressed contents, in addition to enforcing
-bidirectional `included-files.txt` and SHA-256 checksum parity. Missing
-historical evidence is never backfilled.
+Release evidence is bound to one Git commit. The commands that produce
+automated evidence are fixed in
+[`packaging/review-evidence-requirements.json`](../packaging/review-evidence-requirements.json)
+and are read from the release commit itself, so a caller cannot substitute
+another command and an uncommitted edit to the file has no effect.
+
+```bash
+# 1. Start a context for the commit to release (default HEAD).
+python3 packaging/release_evidence.py start --context tests/evidence/release/context-SHORT.json
+
+# 2. Automated evidence: every group runs in a temporary `git worktree` of
+#    that commit, so untracked and uncommitted files do not exist there.
+#    Each group writes tests/evidence/release/SESSION/GROUP.log (command,
+#    output, exit code) plus its declared outputs, and is recorded only when
+#    every command exits 0. --config is the dictionary config the
+#    benchmarks read (default ~/.config/dank-lookup/config.json).
+python3 packaging/release_evidence.py run --context tests/evidence/release/context-SHORT.json --all
+
+# 3. Owner-run evidence (selection latency, real Wayland/DMS sessions).
+python3 packaging/release_evidence.py record --context tests/evidence/release/context-SHORT.json \
+  --group wayland_owner --path tests/evidence/release/wayland/niri-standalone.json
+
+# 4. Build the bundle; the output must be outside the repository.
+bash packaging/build-review-bundle.sh --release-context tests/evidence/release/context-SHORT.json \
+  --output ../dank-lookup-review-VERSION-SHORT.tar.gz
+```
+
+Rules:
+
+- Automated evidence is re-run for every commit; it is never carried over.
+- Owner-run evidence may be carried over to a later commit with
+  `release_evidence.py adopt --context NEW --from OLD`, but only when every
+  path changed since the commit it was taken on is documentation (`*.md` or
+  `docs/`). Any other change requires taking it again. Narrower per-group
+  path rules can be added later beside each manual group.
+- Missing evidence is never backfilled: evidence from an older commit does
+  not count, apart from the adoption rule above.
+- The bundle holds `source/` (`git archive` of the commit), `evidence/`
+  (every recorded file), `environment.json` (captured when the bundle is
+  built), `binding.json` (commit, tree hash, every evidence checksum) and
+  `checksums.sha256` for everything outside `source/`. Verify `source/`
+  against the tree hash in the binding.
+- Before building, the bundle checks the product verdicts: QML smoke,
+  privacy transport and pre-release logs pass; benchmarks carry schema-2 raw
+  samples and the percentile recalculation matches; the giant-entry RSS report
+  passes for every text kind and size; the selection dataset has at least
+  three owner classes with 100 present and 20 absent/exit samples; real
+  Wayland and DMS records pass.
+
+One-time architecture decisions live in [`docs/decisions/`](decisions/), not
+in per-release evidence. The sdcv stdin decision records the sdcv version it
+was made on; the bundle refuses to build when the installed `sdcv --version`
+differs, until the probe is re-run and the record updated.
 
 Fixture sets now require an explicit config/backend; their results are reported
 per set, never collapsed into a generic historical “all passed”. See
