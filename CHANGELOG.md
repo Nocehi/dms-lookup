@@ -2,6 +2,9 @@
 
 ## Unreleased — standalone-first 0.8.0
 
+- Drop the Copy button from dictionary results: copy from the right-click
+  menu on the definition or with Ctrl+C (same payload). Local detections keep
+  their per-value Copy buttons.
 - Add local data detectors (`lib/dank_lookup_detectors.py`): when the whole
   selection is a date, timestamp, URL, e-mail, unit quantity, colour or
   prefixed integer, the result carries an optional `detections` array and the
