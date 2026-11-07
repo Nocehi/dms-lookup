@@ -23,8 +23,9 @@ Item {
     // overlay is shown through overlayShown. setShown() drives both.
     property bool overlayShown: false
     readonly property bool shown: placement === "pointer" ? overlayShown : popup.visible
-    readonly property var card: placement === "pointer" ? pointerCardLoader.item
-                                                        : centerCardLoader.item
+    readonly property var card: placement === "pointer"
+                                ? (pointerOverlayLoader.item ? pointerOverlayLoader.item.cardItem : null)
+                                : centerCardLoader.item
 
     width: 0
     height: 0
@@ -75,7 +76,7 @@ Item {
                 root.card.scale = 0.985
             }
             if (root.placement === "pointer")
-                pointerOverlay.beginPlacement()
+                pointerOverlayLoader.item.beginPlacement()
             root.setShown(true)
             if (root.placement !== "pointer")
                 appearAnimation.restart()
@@ -204,106 +205,116 @@ Item {
     // under it (niri re-checks what is under the pointer every loop). With the
     // pointer hidden (e.g. while typing) no enter arrives and the card falls
     // back to the centre after pointerWaitMs.
-    PanelWindow {
-        id: pointerOverlay
-        visible: root.overlayShown
-        color: "transparent"
-        anchors.top: true
-        anchors.bottom: true
-        anchors.left: true
-        anchors.right: true
-        WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.namespace: "dank-lookup"
-        WlrLayershell.exclusionMode: ExclusionMode.Ignore
-        WlrLayershell.keyboardFocus: visible ? WlrKeyboardFocus.Exclusive
-                                             : WlrKeyboardFocus.None
+    //
+    // The overlay is a layer-shell surface, so it is created only in pointer
+    // mode: a platform without layer shell (offscreen tests, other
+    // compositors) can then still run the default centred card.
+    LazyLoader {
+        id: pointerOverlayLoader
+        active: root.placement === "pointer"
 
-        property bool placed: false
-        readonly property real cardWidth: lookupTheme.windowWidth + 2 * lookupTheme.shadowPadding
-        readonly property real cardHeight: lookupTheme.windowHeight + 2 * lookupTheme.shadowPadding
+        PanelWindow {
+            id: pointerOverlay
+            visible: root.overlayShown
+            color: "transparent"
+            anchors.top: true
+            anchors.bottom: true
+            anchors.left: true
+            anchors.right: true
+            WlrLayershell.layer: WlrLayer.Overlay
+            WlrLayershell.namespace: "dank-lookup"
+            WlrLayershell.exclusionMode: ExclusionMode.Ignore
+            WlrLayershell.keyboardFocus: visible ? WlrKeyboardFocus.Exclusive
+                                                 : WlrKeyboardFocus.None
 
-        function beginPlacement() {
-            placed = false
-            pointerWait.restart()
-        }
+            property bool placed: false
+            readonly property real cardWidth: lookupTheme.windowWidth + 2 * lookupTheme.shadowPadding
+            readonly property real cardHeight: lookupTheme.windowHeight + 2 * lookupTheme.shadowPadding
+            readonly property var cardItem: pointerCardLoader.item
 
-        function placeAt(px, py) {
-            if (placed)
-                return
-            var margin = lookupTheme.screenMargin
-            var gapBelow = lookupTheme.pointerGap
-            var w = cardWidth, h = cardHeight
-            var x = px - w / 2
-            // Below the pointer when it fits, otherwise above it, like the
-            // macOS popover flipping at the screen edge.
-            var y = py + gapBelow - lookupTheme.shadowPadding
-            if (y + h > height - margin)
-                y = py - gapBelow - h + lookupTheme.shadowPadding
-            cardHolder.x = Math.max(margin, Math.min(width - w - margin, x))
-            cardHolder.y = Math.max(margin, Math.min(height - h - margin, y))
-            placed = true
-            pointerWait.stop()
-            appearAnimation.restart()
-        }
-
-        function placeCentred() {
-            placeAt(width / 2, (height - cardHeight) / 2 - lookupTheme.pointerGap
-                               + lookupTheme.shadowPadding)
-        }
-
-        Timer {
-            id: pointerWait
-            interval: lookupTheme.pointerWaitMs
-            onTriggered: pointerOverlay.placeCentred()
-        }
-
-        // Blur behind the card only.
-        BackgroundEffect.blurRegion: lookupTheme.backgroundBlur && pointerOverlay.visible
-                                     && pointerOverlay.placed ? overlayBlurRegion : null
-
-        Region {
-            id: overlayBlurRegion
-            x: cardHolder.x + lookupTheme.shadowPadding
-            y: cardHolder.y + lookupTheme.shadowPadding
-            width: Math.max(0, cardHolder.width - 2 * lookupTheme.shadowPadding)
-            height: Math.max(0, cardHolder.height - 2 * lookupTheme.shadowPadding)
-            radius: lookupTheme.windowRadius
-        }
-
-        // Covers the output: the first pointer report places the card, and a
-        // press outside the card closes it.
-        MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            acceptedButtons: Qt.AllButtons
-            onPositionChanged: function(mouse) { pointerOverlay.placeAt(mouse.x, mouse.y) }
-            onEntered: if (containsMouse) pointerOverlay.placeAt(mouseX, mouseY)
-            onPressed: function(mouse) {
-                if (!pointerOverlay.placed)
-                    pointerOverlay.placeAt(mouse.x, mouse.y)
-                else
-                    root.setShown(false)
+            function beginPlacement() {
+                placed = false
+                pointerWait.restart()
             }
-        }
 
-        Item {
-            id: cardHolder
-            width: pointerOverlay.cardWidth
-            height: pointerOverlay.cardHeight
-            visible: pointerOverlay.placed
+            function placeAt(px, py) {
+                if (placed)
+                    return
+                var margin = lookupTheme.screenMargin
+                var gapBelow = lookupTheme.pointerGap
+                var w = cardWidth, h = cardHeight
+                var x = px - w / 2
+                // Below the pointer when it fits, otherwise above it, like the
+                // macOS popover flipping at the screen edge.
+                var y = py + gapBelow - lookupTheme.shadowPadding
+                if (y + h > height - margin)
+                    y = py - gapBelow - h + lookupTheme.shadowPadding
+                cardHolder.x = Math.max(margin, Math.min(width - w - margin, x))
+                cardHolder.y = Math.max(margin, Math.min(height - h - margin, y))
+                placed = true
+                pointerWait.stop()
+                appearAnimation.restart()
+            }
 
-            // Swallow presses on the card's own margin and body.
+            function placeCentred() {
+                placeAt(width / 2, (height - cardHeight) / 2 - lookupTheme.pointerGap
+                                   + lookupTheme.shadowPadding)
+            }
+
+            Timer {
+                id: pointerWait
+                interval: lookupTheme.pointerWaitMs
+                onTriggered: pointerOverlay.placeCentred()
+            }
+
+            // Blur behind the card only.
+            BackgroundEffect.blurRegion: lookupTheme.backgroundBlur && pointerOverlay.visible
+                                         && pointerOverlay.placed ? overlayBlurRegion : null
+
+            Region {
+                id: overlayBlurRegion
+                x: cardHolder.x + lookupTheme.shadowPadding
+                y: cardHolder.y + lookupTheme.shadowPadding
+                width: Math.max(0, cardHolder.width - 2 * lookupTheme.shadowPadding)
+                height: Math.max(0, cardHolder.height - 2 * lookupTheme.shadowPadding)
+                radius: lookupTheme.windowRadius
+            }
+
+            // Covers the output: the first pointer report places the card, and a
+            // press outside the card closes it.
             MouseArea {
                 anchors.fill: parent
+                hoverEnabled: true
                 acceptedButtons: Qt.AllButtons
+                onPositionChanged: function(mouse) { pointerOverlay.placeAt(mouse.x, mouse.y) }
+                onEntered: if (containsMouse) pointerOverlay.placeAt(mouseX, mouseY)
+                onPressed: function(mouse) {
+                    if (!pointerOverlay.placed)
+                        pointerOverlay.placeAt(mouse.x, mouse.y)
+                    else
+                        root.setShown(false)
+                }
             }
 
-            Loader {
-                id: pointerCardLoader
-                anchors.fill: parent
-                active: root.placement === "pointer"
-                sourceComponent: cardComponent
-                focus: pointerOverlay.visible
+            Item {
+                id: cardHolder
+                width: pointerOverlay.cardWidth
+                height: pointerOverlay.cardHeight
+                visible: pointerOverlay.placed
+
+                // Swallow presses on the card's own margin and body.
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.AllButtons
+                }
+
+                Loader {
+                    id: pointerCardLoader
+                    anchors.fill: parent
+                    active: root.placement === "pointer"
+                    sourceComponent: cardComponent
+                    focus: pointerOverlay.visible
+                }
             }
         }
     }
