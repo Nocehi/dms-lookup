@@ -139,6 +139,11 @@ Item {
                 if (event.key === Qt.Key_Escape) {
                     root.setShown(false)
                     event.accepted = true
+                } else if (event.matches(StandardKey.Copy)
+                           && root.lookupController.phase === "ready"
+                           && root.lookupController.activeBody() !== "") {
+                    root.copyActiveBody()
+                    event.accepted = true
                 }
             }
 

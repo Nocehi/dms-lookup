@@ -338,6 +338,66 @@ Item {
             anchors.leftMargin: root.theme.popoutPadding
             anchors.rightMargin: root.theme.popoutPadding
 
+            // Right-click on the definition opens a one-item menu that copies
+            // what the Copy button used to copy (the active preview body).
+            TapHandler {
+                acceptedButtons: Qt.RightButton
+                enabled: root.controller.phase === "ready"
+                         && root.controller.activeBody() !== ""
+                onTapped: function(eventPoint) {
+                    copyMenu.x = Math.min(eventPoint.position.x,
+                                          bodyArea.width - copyMenu.width)
+                    copyMenu.y = Math.min(eventPoint.position.y,
+                                          bodyArea.height - copyMenu.height)
+                    copyMenu.open()
+                }
+            }
+
+            T.Popup {
+                id: copyMenu
+                padding: root.theme.spacingXS
+                implicitWidth: copyItem.implicitWidth + 2 * padding
+                implicitHeight: copyItem.implicitHeight + 2 * padding
+                closePolicy: T.Popup.CloseOnEscape | T.Popup.CloseOnPressOutside
+
+                background: Rectangle {
+                    radius: root.theme.radiusSmall
+                    color: root.theme.surface_container_high
+                    border.color: root.theme.borderColor
+                    border.width: root.theme.borderWidth
+                }
+
+                contentItem: T.Button {
+                    id: copyItem
+                    implicitWidth: Math.max(root.theme.minControlWidth,
+                                            copyItemText.implicitWidth
+                                            + 2 * root.theme.spacingM)
+                    implicitHeight: root.theme.controlHeight
+                    hoverEnabled: true
+
+                    contentItem: Text {
+                        id: copyItemText
+                        text: root.ui("Copy", "複製")
+                        color: root.theme.on_surface
+                        font.family: root.theme.fontUi
+                        font.pixelSize: root.theme.fontSizeSmall
+                        verticalAlignment: Text.AlignVCenter
+                    }
+
+                    background: Rectangle {
+                        radius: root.theme.radiusSmall
+                        color: copyItem.hovered
+                               ? root.alpha(root.theme.on_surface, root.theme.quietSelected)
+                               : "transparent"
+                    }
+
+                    onClicked: {
+                        copyMenu.close()
+                        root.copyRequested()
+                    }
+                }
+            }
+
             Column {
                 anchors.centerIn: parent
                 width: Math.min(parent.width, root.theme.loadingWidth)
@@ -664,9 +724,11 @@ Item {
                 Repeater {
                     // A detection offers one Copy per detected value and no
                     // Open full; dictionary results keep Copy + Open full.
+                    // Dictionary text is copied from the right-click menu on the
+                    // body (or Ctrl+C), so only Open full stays as a button.
                     model: {
                         if (!root.controller.activeIsDetection())
-                            return ["copy", "open"]
+                            return ["open"]
                         var choices = root.controller.activeCopyChoices()
                         if (choices.length <= 1)
                             return ["copy"]
