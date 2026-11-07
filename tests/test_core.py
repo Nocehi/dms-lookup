@@ -1730,6 +1730,20 @@ class StyleRunTests(unittest.TestCase):
         # No language label: left as it is.
         self.assertEqual(self.flags_of(runs, "a turkey"), "")
 
+    def test_wiktionary_form_of_templates_are_labels(self):
+        raw = ("anagr.\n(noun form of et rebane  gen s)\n"
+               "vb.\n1 (lb en dentistry) To replace the base of a denture.\n"
+               "n.\n1 (plural of en rebase) More bases.")
+        _, runs = self.styled(raw, name=self.WIKT)
+        # Estonian block: greyed as another language's entry.
+        self.assertEqual(self.flags_of(runs, "(noun form of et rebane  gen s)"), "di")
+        self.assertEqual(self.flags_of(runs, " To replace the base of a denture."), "")
+        self.assertEqual(self.flags_of(runs, "(plural of en rebase)"), "di")
+        self.assertEqual(self.flags_of(runs, " More bases."), "")
+        # Prose with "of" stays plain.
+        _, runs = self.styled("1 A part (of some items) here.", name=self.WIKT)
+        self.assertEqual(runs[1:], [[" A part (of some items) here.", ""]])
+
     def test_gcide_head_brackets_cross_references_and_quotations(self):
         raw = ("Ligula \\Lig\"u*la\\ (l[i^]g\"[-u]*l[.a]), n.; pl. L. {Ligul[ae]}\n"
                "   (-l[=e]). [L., a little tongue. See\n"
