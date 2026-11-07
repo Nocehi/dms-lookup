@@ -41,6 +41,8 @@ ShellRoot {
 
     DankLookup.LookupTheme {
         id: theme
+        requestedWidth: Number(Quickshell.env("DANK_LOOKUP_CARD_WIDTH") || 0)
+        requestedHeight: Number(Quickshell.env("DANK_LOOKUP_CARD_HEIGHT") || 0)
         dark: (Quickshell.env("DANK_LOOKUP_THEME_VARIANT") || "dark") !== "light"
     }
 

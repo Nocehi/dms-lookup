@@ -157,17 +157,42 @@ QtObject {
     readonly property string fontMono: "Sarasa Mono HC"
 
     // ---- Window and motion ---------------------------------------------------
-    // About 34 CJK characters per body line at fontSizeMedium.
-    readonly property real windowWidth: 560
-    readonly property real windowHeight: 460
-    readonly property real windowMinWidth: 440
+    // Card size follows macOS Look Up: about 385 pt wide in every macOS version
+    // since High Sierra, at most 400-450 pt tall, longer entries scroll inside.
+    // 400 x 420 gives about 24 CJK characters per body line at fontSizeMedium.
+    // The frontend may request another size (DANK_LOOKUP_CARD_WIDTH /
+    // DANK_LOOKUP_CARD_HEIGHT); a host token wins; the result is clamped to
+    // the min/max below. The earlier card was 560 x 460.
+    readonly property real defaultWindowWidth: 400
+    readonly property real defaultWindowHeight: 420
+    property real requestedWidth: 0
+    property real requestedHeight: 0
+    readonly property real windowWidth: clampSize(
+        hostValue("windowWidth", requestedWidth > 0 ? requestedWidth : defaultWindowWidth),
+        windowMinWidth, windowMaxWidth)
+    readonly property real windowHeight: clampSize(
+        hostValue("windowHeight", requestedHeight > 0 ? requestedHeight : defaultWindowHeight),
+        windowMinHeight, windowMaxHeight)
+    readonly property real windowMinWidth: 360
     readonly property real windowMinHeight: 280
     readonly property real windowMaxWidth: 760
     readonly property real windowMaxHeight: 640
+    // Pointer placement: distance from the pointer to the card edge, distance
+    // kept from the screen edge, and how long to wait for the pointer position.
+    readonly property real pointerGap: spacingXL
+    readonly property real screenMargin: spacingL
+    readonly property int pointerWaitMs: 120
     readonly property int appearDuration: 170
     readonly property int loadingSweepDuration: 220
 
     // ---- Functions -----------------------------------------------------------
+    function clampSize(value, low, high) {
+        var number = Number(value)
+        if (!isFinite(number) || number <= 0)
+            return low
+        return Math.max(low, Math.min(high, number))
+    }
+
     function hostValue(name, fallback) {
         if (host && host[name] !== undefined && host[name] !== null)
             return host[name]

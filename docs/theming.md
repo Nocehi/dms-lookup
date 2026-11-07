@@ -60,6 +60,24 @@ font's ascent + descent box, not the ink. Misans TC VF centres CJK labels within
 1 px, so no optical offset is applied. `bodyLineHeight` (1.45) applies only to
 the result body and does not change control heights.
 
+## Card size
+
+The card is 400 x 420 px by default, close to macOS Look Up (about 385 pt wide
+in every version since High Sierra, at most 400-450 pt tall, longer entries
+scroll inside). The height is fixed, as on Big Sur and later; long entries
+scroll inside the card. To pick another size, set it on the resident frontend:
+
+```ini
+[Service]
+Environment=DANK_LOOKUP_CARD_WIDTH=560
+Environment=DANK_LOOKUP_CARD_HEIGHT=460
+```
+
+Values are clamped to `windowMinWidth`..`windowMaxWidth` (360-760) and
+`windowMinHeight`..`windowMaxHeight` (280-640). The DMS wrapper can pass
+`windowWidth` / `windowHeight` as host tokens instead. 560 x 460 is the earlier
+default.
+
 ## Palette
 
 Colours are matugen role names: `primary`, `on_primary`, `surface`,
