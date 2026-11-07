@@ -31,7 +31,7 @@
   RSS against the CPython string size (UTF-8 ratios are still recorded).
 - `dank-lookup backend-request`, run for every card lookup, no longer imports
   the lookup core.
-- The pointer-placement overlay is created only with
+- The pointer-placement overlay lives in `qml/PointerOverlay.qml` and is loaded only with
   `DANK_LOOKUP_PLACEMENT=pointer`, so platforms without layer shell (and the
   offscreen QML tests) load the default centred card again.
 - Card redesign, measured against DMS 2.0 and macOS Look Up:
