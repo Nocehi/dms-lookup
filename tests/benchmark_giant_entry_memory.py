@@ -60,8 +60,18 @@ def _make_definition(kind: str, size_bytes: int, tail: str) -> str:
     else:
         raise ValueError(f"unknown text kind {kind!r}")
     definition = body + tail
-    assert len(definition.encode("utf-8")) == size_bytes
+    # Count UTF-8 bytes in chunks: encoding the whole text at once would put a
+    # full UTF-8 copy next to the str and inflate the measured peak RSS.
+    assert _utf8_size(definition) == size_bytes
     return definition
+
+
+def _utf8_size(value: str) -> int:
+    step = 1024 * 1024
+    return sum(
+        len(value[offset : offset + step].encode("utf-8"))
+        for offset in range(0, len(value), step)
+    )
 
 
 def _digest_text(parts: list[str]) -> str:
@@ -222,6 +232,12 @@ def _run_parent(output: pathlib.Path | None, approved_multiplier: float | None) 
             "Mixed-width text is held at 2-4x its UTF-8 size in CPython "
             "(one BMP character such as IPA doubles it, one astral character "
             "quadruples it); the full entry text is a str for Copy and Open full.",
+            "Pure BMP CJK is the worst case under the str basis: its str is about "
+            "0.67x its UTF-8 size, so any UTF-8 copy alive at the peak weighs about "
+            "1.5x against the str denominator. The benchmark starts from "
+            "render_entries; the sdcv path also holds the JSON stdout bytes and "
+            "their decoded copy while parsing, which this benchmark does not measure. "
+            "Freeing the raw bytes right after decoding would lower that peak.",
         ],
         "text_kinds": list(TEXT_KINDS),
         "raw_samples": samples,

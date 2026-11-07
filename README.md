@@ -311,7 +311,10 @@ per set, never collapsed into a generic historical “all passed”. See
   of its widest character: an entry that is mostly ASCII but contains one IPA
   character takes about 2x its UTF-8 file size in memory, and one emoji or
   CJK extension character about 4x. Giant entries are therefore larger in
-  memory than their dictionary size suggests.
+  memory than their dictionary size suggests. Pure CJK is the worst case
+  for the giant-entry gate: its string is smaller than its UTF-8 size, so a
+  UTF-8 copy alive at the same time (for example sdcv's JSON output before
+  it is parsed, which the benchmark does not cover) weighs about 1.5x more.
 - The force-press trigger is experimental and specific to the Apple Magic
   Trackpad (A3120); it needs a udev rule installed with root.
 
