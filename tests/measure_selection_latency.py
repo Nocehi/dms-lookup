@@ -14,8 +14,12 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import time
 from typing import Any
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from source_identity import checkout_source  # noqa: E402
 
 
 SCHEMA_VERSION = 1
@@ -111,6 +115,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             "content_stored": False,
             "content_hash_stored": False,
         },
+        "tested_source": checkout_source(pathlib.Path(__file__).resolve().parent.parent),
         "samples": samples,
     }
 

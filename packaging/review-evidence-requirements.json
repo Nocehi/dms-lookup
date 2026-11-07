@@ -58,10 +58,20 @@
     }
   },
   "manual": {
-    "selection_raw_latency": ["tests/evidence/release/selection/raw-*.json"],
-    "selection_tradeoff_report": ["tests/evidence/release/selection/report-*.json"],
-    "wayland_owner": ["tests/evidence/release/wayland/niri-*.json"],
-    "dms_session_owner": ["tests/evidence/release/wayland/*dms*.json"]
+    "selection_raw_latency": {
+      "patterns": ["tests/evidence/release/selection/raw-*.json"],
+      "depends_on": ["tests/measure_selection_latency.py", "tests/source_identity.py"]
+    },
+    "selection_tradeoff_report": {
+      "patterns": ["tests/evidence/release/selection/report-*.json"],
+      "depends_on": ["tests/report_selection_latency.py", "tests/source_identity.py"]
+    },
+    "wayland_owner": {
+      "patterns": ["tests/evidence/release/wayland/niri-*.json"]
+    },
+    "dms_session_owner": {
+      "patterns": ["tests/evidence/release/wayland/*dms*.json"]
+    }
   },
   "decisions": {
     "sdcv_stdin": {

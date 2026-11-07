@@ -119,11 +119,27 @@ bash packaging/build-review-bundle.sh --release-context tests/evidence/release/c
 Rules:
 
 - Automated evidence is re-run for every commit; it is never carried over.
-- Owner-run evidence may be carried over to a later commit with
-  `release_evidence.py adopt --context NEW --from OLD`, but only when every
-  path changed since the commit it was taken on is documentation (`*.md` or
-  `docs/`). Any other change requires taking it again. Narrower per-group
-  path rules can be added later beside each manual group.
+- Owner-run evidence names the code it measured in `tested_source`
+  (commit and whether it had uncommitted changes). `verify_wayland_presentation.py`
+  reads it from `~/.local/lib/dank-lookup/installed-source.json`, which
+  `install-user.sh` writes from the checkout it installs (untracked QML counts
+  as a change, because the installer copies it). The selection latency
+  scripts read it from the checkout they run from. `record` refuses a file
+  without it, a file that measured uncommitted code, and a file whose commit
+  differs from the release commit in a path the group depends on; the bundle
+  checks the same again. So re-install before taking real-session evidence.
+- What a manual group depends on: the `depends_on` globs it declares in the
+  requirements file, or, when it declares none, every path that is not
+  documentation (`*.md`, `docs/`). The selection latency groups depend only on
+  their measuring scripts, because they time `wl-paste` and never run
+  `bin/` or `lib/`. The Wayland and DMS groups declare nothing.
+- `release_evidence.py adopt --context NEW --from OLD` carries owner-run
+  evidence into a new context under the same rule.
+  Contexts from 0.8.0 and earlier (schema 1) are not bound to a commit, so
+  their owner-run evidence cannot be adopted; take it again.
+- Logs of groups that read the dictionary config (`{config}`) record its path
+  and SHA-256, so a later run on another config is visible. The dictionaries
+  themselves are not hashed.
 - Missing evidence is never backfilled: evidence from an older commit does
   not count, apart from the adoption rule above.
 - The bundle holds `source/` (`git archive` of the commit), `evidence/`

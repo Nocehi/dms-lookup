@@ -338,6 +338,21 @@ elif tokenizer_was_managed && [[ -f "$TOKENIZER_DEST" ]]; then
 fi
 install_managed 600 /dev/null app_lib .installed-by-dank-lookup
 
+# Name the commit this copy came from, so owner-run checks of the installed
+# card can be tied to it (tests/source_identity.py). Untracked files count as
+# changes because the qml/ glob installs untracked QML files as well.
+INSTALLED_SOURCE="$TEMP_ROOT/installed-source.json"
+if source_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" \
+    && source_status="$(git -C "$REPO_ROOT" status --porcelain -- \
+        bin lib qml standalone plugin language-packs systemd 2>/dev/null)"; then
+    if [[ -n "$source_status" ]]; then source_changes=true; else source_changes=false; fi
+    printf '{"commit": "%s", "uncommitted_changes": %s}\n' \
+        "$source_commit" "$source_changes" >"$INSTALLED_SOURCE"
+else
+    printf '{"commit": null, "uncommitted_changes": true}\n' >"$INSTALLED_SOURCE"
+fi
+install_managed 644 "$INSTALLED_SOURCE" app_lib installed-source.json
+
 "$DEST_BIN/dank-lookup-language-packs" install-config
 
 if "$WITH_DMS"; then

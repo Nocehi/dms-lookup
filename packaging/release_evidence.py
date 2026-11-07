@@ -6,16 +6,20 @@
           automated evidence group, in a temporary worktree of that commit,
           and record the log and declared outputs
   record  record an owner-run (manual) evidence file
-  adopt   carry manual evidence over from an older context when the commits
-          differ only in documentation
+  adopt   carry manual evidence over from an older context
 
 Automated evidence is never carried over: it is re-run for every commit.
+Manual evidence names the commit it measured (``tested_source``). It counts
+for the release commit when the two differ in no path the group depends on:
+the group's ``depends_on`` globs, or, when a group declares none, any path
+that is not documentation.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fnmatch
 import hashlib
 import json
 import os
@@ -65,6 +69,38 @@ def is_documentation_path(path: str) -> bool:
 
 def changed_paths(root: pathlib.Path, old: str, new: str) -> list[str]:
     return [line for line in git(root, "diff", "--name-only", old, new).splitlines() if line]
+
+
+def invalidating_changes(
+    root: pathlib.Path, group: Mapping[str, object], old: str, new: str
+) -> list[str]:
+    """Paths changed between two commits that a manual group depends on."""
+
+    if old == new:
+        return []
+    depends_on = group.get("depends_on") or []
+    paths = changed_paths(root, old, new)
+    if depends_on:
+        return [p for p in paths if any(fnmatch.fnmatchcase(p, g) for g in depends_on)]
+    return [p for p in paths if not is_documentation_path(p)]
+
+
+def tested_commit(path: pathlib.Path) -> str:
+    """The commit a manual evidence file says it measured."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReleaseEvidenceError(f"manual evidence is not JSON: {path.name}") from exc
+    source = value.get("tested_source") if isinstance(value, dict) else None
+    if not isinstance(source, dict) or not isinstance(source.get("commit"), str):
+        raise ReleaseEvidenceError(
+            f"manual evidence does not name the commit it measured: {path.name} "
+            "(re-take it with the current tools)"
+        )
+    if source.get("uncommitted_changes") is not False:
+        raise ReleaseEvidenceError(f"manual evidence measured uncommitted code: {path.name}")
+    return source["commit"]
 
 
 def sha256_file(path: pathlib.Path) -> str:
@@ -120,8 +156,16 @@ def _validate_requirements(value: dict) -> dict:
             or not all(isinstance(item, str) and "/" not in item for item in outputs)
         ):
             raise ReleaseEvidenceError(f"automated group {name} is malformed")
-    for name, patterns in manual.items():
-        if not isinstance(patterns, list) or not patterns or not all(isinstance(p, str) for p in patterns):
+    for name, group in manual.items():
+        patterns = group.get("patterns") if isinstance(group, dict) else None
+        depends_on = group.get("depends_on", []) if isinstance(group, dict) else None
+        if (
+            not isinstance(patterns, list)
+            or not patterns
+            or not all(isinstance(p, str) for p in patterns)
+            or not isinstance(depends_on, list)
+            or not all(isinstance(p, str) for p in depends_on)
+        ):
             raise ReleaseEvidenceError(f"manual group {name} is malformed")
     return value
 
@@ -159,6 +203,11 @@ def create_context(root: pathlib.Path, context_path: pathlib.Path, rev: str = "H
 
 def load_context(context_path: pathlib.Path) -> dict:
     context = _load_json(context_path)
+    if context.get("schema_version") == 1:
+        raise ReleaseEvidenceError(
+            "schema-1 context (0.8.0 and earlier) is not bound to a commit; its evidence "
+            "cannot be adopted, so take owner-run evidence again and record it"
+        )
     if (
         context.get("schema_version") != CONTEXT_SCHEMA_VERSION
         or context.get("kind") != "dank_lookup_release_context"
@@ -214,6 +263,9 @@ def run_group(
         f"started_utc: {_now()}",
         "",
     ]
+    if any("{config}" in arg for argv in definition["commands"] for arg in argv):
+        digest = sha256_file(config) if config.is_file() else "missing"
+        lines.insert(3, f"config: {config} sha256 {digest}")
     passed = True
     with tempfile.TemporaryDirectory(prefix="dank-lookup-release-") as temporary:
         worktree = pathlib.Path(temporary) / "source"
@@ -269,26 +321,34 @@ def record_manual(
 ) -> None:
     context = load_context(context_path)
     requirements = load_requirements(root, str(context["commit"]))
-    patterns = requirements["manual"].get(group)
-    if patterns is None:
+    definition = requirements["manual"].get(group)
+    if definition is None:
         raise ReleaseEvidenceError(f"not a manual evidence group: {group}")
+    patterns = definition["patterns"]
     for path in paths:
         relative = _relative(root, path)
         if not path.is_file():
             raise ReleaseEvidenceError(f"manual evidence is not a file: {relative}")
         if not any(pathlib.PurePosixPath(relative).match(pattern) for pattern in patterns):
             raise ReleaseEvidenceError(f"{relative} does not match the {group} patterns")
+        measured = tested_commit(path)
+        changes = invalidating_changes(root, definition, measured, str(context["commit"]))
+        if changes:
+            raise ReleaseEvidenceError(
+                f"{relative} measured {measured[:12]}, which differs from the release commit in "
+                + ", ".join(changes[:10])
+            )
         context["evidence"][relative] = {
             "group": group,
             "kind": "manual",
-            "commit": context["commit"],
+            "commit": measured,
             "sha256": sha256_file(path),
         }
     _write_json(context_path, context)
 
 
 def adopt_manual(root: pathlib.Path, context_path: pathlib.Path, from_path: pathlib.Path) -> list[str]:
-    """Carry manual evidence over when only documentation changed since it was taken."""
+    """Carry manual evidence over when nothing it depends on changed since it was taken."""
 
     context = load_context(context_path)
     previous = load_context(from_path)
@@ -297,15 +357,13 @@ def adopt_manual(root: pathlib.Path, context_path: pathlib.Path, from_path: path
     for relative, entry in previous["evidence"].items():
         if entry.get("kind") != "manual" or entry.get("group") not in requirements["manual"]:
             continue
-        code_changes = [
-            path
-            for path in changed_paths(root, str(entry["commit"]), str(context["commit"]))
-            if not is_documentation_path(path)
-        ]
-        if code_changes:
+        changes = invalidating_changes(
+            root, requirements["manual"][entry["group"]], str(entry["commit"]), str(context["commit"])
+        )
+        if changes:
             raise ReleaseEvidenceError(
-                f"cannot adopt {relative}: non-documentation changes since "
-                f"{str(entry['commit'])[:12]}: " + ", ".join(code_changes[:10])
+                f"cannot adopt {relative}: changes it depends on since "
+                f"{str(entry['commit'])[:12]}: " + ", ".join(changes[:10])
             )
         if sha256_file(root / relative) != entry.get("sha256"):
             raise ReleaseEvidenceError(f"cannot adopt {relative}: file changed since it was recorded")
@@ -335,12 +393,14 @@ def verify_context(root: pathlib.Path, context: Mapping[str, object]) -> dict[st
         if entry.get("kind") == "automated":
             if entry.get("commit") != commit or group not in requirements["automated"]:
                 raise ReleaseEvidenceError(f"automated evidence is not from the release commit: {relative}")
-        elif entry.get("commit") != commit:
-            code_changes = [
-                p for p in changed_paths(root, str(entry["commit"]), commit) if not is_documentation_path(p)
-            ]
-            if code_changes:
-                raise ReleaseEvidenceError(f"manual evidence predates code changes: {relative}")
+        else:
+            if group not in requirements["manual"]:
+                raise ReleaseEvidenceError(f"manual evidence in an automated group: {relative}")
+            measured = tested_commit(path)
+            if measured != entry.get("commit") or invalidating_changes(
+                root, requirements["manual"][group], measured, commit
+            ):
+                raise ReleaseEvidenceError(f"manual evidence measured other code: {relative}")
         groups[group].append(path)
     for name in requirements["automated"]:
         logs = [path for path in groups[name] if path.suffix == ".log"]
