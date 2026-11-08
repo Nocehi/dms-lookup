@@ -31,9 +31,13 @@ Ways to get lookup working in LyX:
   `prepare()` offers PRIMARY lazily on Wayland: on selection it registers a
   `QMimeData` subclass whose `retrieveData()` reads the current selection only
   when another client asks. This matches LyX's X11 behaviour and avoids
-  recomputing large selections on every cursor move. With no active selection
-  it returns an empty string rather than the previous text. The patch lives on a
-  local branch and must be reapplied when the AUR package is updated.
+  recomputing large selections on every cursor move. When the selection has
+  been cleared it keeps offering the last selected text, as LyX does under X11.
+  This is required for a deep press: LyX clears the selection as soon as the
+  mouse button goes down (`mouseSetCursor()` calls `saveSelection()`), while
+  the deep press reads PRIMARY only on release. The patch is Wayland-only and
+  lives on a local branch of the `~/lyx` PKGBUILD repository; it must be
+  reapplied when the AUR package is updated.
 - `QT_QPA_PLATFORM=xcb lyx` runs LyX through XWayland (xwayland-satellite).
   Untested whether PRIMARY reaches Wayland clients this way; HiDPI and fcitx5
   input may get worse.
@@ -51,11 +55,12 @@ to find which LyX process has a file open.
 **Interaction with Dank Lookup.** The card shell itself never reads PRIMARY or
 the clipboard. However, a card jump briefly selects the heading paragraph
 (`heading_fingerprint()` runs `paragraph-select`, reads statistics, then
-`line-begin`). With the lazy LyX patch above, that selection is gone before any
-client asks for PRIMARY, so a later lookup sees an empty selection and never
-the heading text. A patch that wrote PRIMARY eagerly on every selection change
-would instead replace the user's selection with the heading on each jump; do
-not change the LyX patch in that direction without checking the card shell.
+`line-begin`). Because the LyX patch keeps offering the last cleared selection,
+PRIMARY holds that heading's text after a jump. A lookup triggered in LyX
+without a new selection therefore looks up the heading; middle-click paste
+pastes it. The card shell's own features are unaffected. The lazy design still
+matters: a patch that wrote PRIMARY eagerly on every selection change would
+also recompute large selections on each cursor move.
 
 ## When changing things
 
