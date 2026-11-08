@@ -228,6 +228,12 @@ created by Open full have automatic short-TTL cleanup (300 seconds by default).
 See
 [`docs/privacy.md`](docs/privacy.md) for lifecycle and threat boundaries.
 
+## Related projects
+
+Local projects outside this repository that interact with Dank Lookup (a
+patched LyX build and a LyX card wall) are described in
+[`docs/related-projects.md`](docs/related-projects.md).
+
 ## Repository layout
 
 ```text
